@@ -1,11 +1,11 @@
-# script域扩展
+# script增强特性
 
 在原生自定义组件config的基础上，`mpx`新增支持了watch、computed、mixins、pageShow & pageHide等字段提高开发体验，同时`mpx`提供一个深度优化的机制来接管小程序的`setData`调用，用户在组件/页面当中可以使用`this.someData = 'abc'`的方式来设置数据，永远不应该直接调用`setData`去设置数据，这有可能导致数据不一致的问题。
 
 ## computed
 
-计算属性是一个纯函数，利用组合其它数据的方式返回一个新的数据，你可以像绑定普通数据一样在模板中绑定计算属性。
-
+计算属性是一个函数/带setter和getter的对象，利用组合其它数据的方式返回一个新的数据，你可以像绑定普通数据一样在模板中绑定计算属性。
+> 类型：{ [key: string]: Function | { get: Function, set: Function } }
 > 适用于【页面 | 组件】
 
 示例：
@@ -22,17 +22,30 @@
 import {createComponent} from '@mpxjs/core'
 createComponent({
   data: {
-    message: 'Hello'
+    message: 'Hello',
+    num: 5
   },
   computed: {
     // 计算属性
     reversedMessage: function () {
       return this.message.split('').reverse().join('')
+    },
+    // 读取和设置
+    computeNum: {
+      get: function () {
+        return this.num - 1
+      },
+      set: function (val) {
+        this.num = val + 1
+      }
     }
   },
   ready() {
     // 改变message后reversedMessage会同步更新，模板也会重新渲染
     this.message = 'Hello world!'
+    this.computeNum // 4
+    this.computeNum = 10 
+    this.num // 11
   }
 })
 </script>
@@ -59,13 +72,40 @@ import {createComponent} from '@mpxjs/core'
 createComponent({
   data: {
     question: 'old',
-    answer: 'I cannot give you an answer until you ask a question!'
+    answer: 'I cannot give you an answer until you ask a question!',
+    info: {
+      name: 'a'
+    },
+    arr: [{
+      age: 1
+    }]
   },
   watch: {
     // 如果 `question` 发生改变，这个函数就会运行
     question: function (newval, oldval) {
       console.log(newval, ':',  oldval) // test:old
       this.answer = 'Waiting for you to stop typing...'
+    },
+    question: {
+      handler (newval, oldval) {
+        console.log(newval, ':',  oldval) // test:old
+        this.answer = 'Waiting for you to stop typing...'
+      },
+      imeediate: true // 立即执行一次
+      // deep: true // 是否深度观察
+      // sync: true // 数据变化之后是否同步执行，默认是进行异步队列
+    },
+    'info.name' (val) {
+      // 支持路径表达式
+      console.log(val) // b
+    },
+    'arr[0].age' (val) {
+      // 支持路径表达式
+      console.log(val) // 100
+    },
+    'question, answer' (val, old) {
+      // 同时观察多个值, val为数组个数, question变化时
+      console.log(val) // ['test', 'I cannot give you an answer until you ask a question!']
     }
   },
   attached () {
@@ -77,6 +117,8 @@ createComponent({
   methods: {
     changeData() {
       this.question = 'test'
+      this.info.name = 'b'
+      this.arr[0].age = 100
     }
   }
 })
@@ -129,16 +171,47 @@ export default {
 </script>
 ```
 
-输出结果为  
+输出结果为
 ```
-mixins ready: 手机 
+mixins ready: 手机
 component ready: 电视
 ```
 
 
-## 页面生命周期
+## 页面生命周期转换
 
-除了小程序自定义组件本身的生命周期外，`mpx`扩展了两个页面生命周期钩子，`pageShow`和`pageHide`，用于监听当前所属页面的显示或隐藏状态。
+除了类支付宝小程序之外，其他平台都能以组件的方式创建页面，因此mpx内部默认是以Component来创建页面的（微信小程序、百度小程序、头条小程序等类微信小程序）。[按官方标准](https://developers.weixin.qq.com/miniprogram/dev/framework/custom-component/component.html)，以Component创建页面时，页面特有的生命周期（onLoad、onReady、onShow等等）都必须`定义在methods内部`。为了进行统一处理，使用`mpx.createPage创建页面`时，可以统一使用标准页面的格式，`所有生命周期都定义在最外层即可`，mpx内部会根据普通进行`自动转换`到methods里面
+
+```html
+<script>
+import {createPage} from '@mpxjs/core'
+// 类微信小程序
+createPage({
+  onLoad () {
+    // 页面加载
+    console.log('page onload')
+  },
+  onShow () {
+    // 页面显示
+    console.log('page onload')
+  },
+  onPullDownRefresh () {
+    // 需在json域开启enablePullDownRefresh
+    console.log('page onPullDownRefresh')
+  },
+  attached () {
+    // 以Component创建页面，那么页面也将具体组件的生命周期
+  },
+  detached () {
+    // 以Component创建页面，那么页面也将具体组件的生命周期
+  }
+})
+</script>
+```
+
+
+## 组件生命周期扩展
+除了小程序自定义组件本身的生命周期外，`mpx`为组件本身提供了两个生命周期钩子，`pageShow`和`pageHide`，用于监听当前组件所属页面的显示或隐藏状态。
 
 > 适用于【组件】
 

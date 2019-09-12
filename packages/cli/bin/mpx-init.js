@@ -14,6 +14,8 @@ const logger = require('../lib/logger')
 const generate = require('../lib/generate')
 const checkVersion = require('../lib/check-version')
 const localPath = require('../lib/local-path')
+const pkg = require('../package.json')
+const updateNotifier = require('update-notifier')
 
 const isLocalPath = localPath.isLocalPath
 const getTemplatePath = localPath.getTemplatePath
@@ -25,7 +27,7 @@ const getTemplatePath = localPath.getTemplatePath
 program
   .usage('[project-name]')
   .option('-c, --clone', 'use git clone')
-  .option('--offline', 'use cached template')
+  .option('--offline [value]', 'use cached template or specific a local path to mpx-template')
   .on('--help', () => {
     console.log()
     console.log('  Examples:')
@@ -52,9 +54,16 @@ const clone = program.clone || false
 
 const tmp = path.join(home, '.mpx-templates', template)
 if (program.offline) {
-  console.log(`> Use cached template at ${chalk.yellow(tildify(tmp))}`)
-  template = tmp
+  if (typeof program.offline === 'boolean') {
+    console.log(`> Use cached template at ${chalk.yellow(tildify(tmp))}`)
+    template = tmp
+  } else if (typeof program.offline === 'string') {
+    console.log(`> Use local template at ${chalk.yellow(tildify(program.offline))}`)
+    template = program.offline
+  }
 }
+
+updateNotifier({ pkg, updateCheckInterval: 0 }).notify({ isGlobal: true })
 
 /**
  * Padding.
@@ -118,7 +127,7 @@ function downloadAndGenerate (template) {
   spinner.start()
   // Remove if local template exists
   if (exists(tmp)) rm(tmp)
-  download(template, tmp, {clone}, err => {
+  download(template, tmp, { clone }, err => {
     spinner.stop()
     if (err) logger.fatal('Failed to download repo ' + template + ': ' + err.message.trim())
     generate(name, tmp, to, err => {

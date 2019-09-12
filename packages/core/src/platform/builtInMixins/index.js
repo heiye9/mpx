@@ -1,15 +1,17 @@
 import pageStatusMixin from './pageStatusMixin'
 import proxyEventMixin from './proxyEventMixin'
-import componentMixin from './componentMixin'
 import renderHelperMixin from './renderHelperMixin'
-import injectHelperMixin from './injectHelperMixin'
+import refsMixin from './refsMixin'
+import showMixin from './showMixin'
+import relationsMixin from './relationsMixin'
 
-export default function getBuiltInMixins (type, options) {
+export default function getBuiltInMixins (options, type) {
   return [
-    pageStatusMixin(type, options),
-    proxyEventMixin(type, options),
-    componentMixin(type, options),
+    pageStatusMixin(type),
+    proxyEventMixin(),
     renderHelperMixin(),
-    injectHelperMixin()
+    refsMixin(),
+    showMixin(type),
+    relationsMixin(type)
   ].filter(item => item)
 }

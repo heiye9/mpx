@@ -5,8 +5,12 @@ const tryRequire = require('./utils/try-require')
 const styleCompilerPath = normalize.lib('style-compiler/index')
 const templateCompilerPath = normalize.lib('template-compiler/index')
 const jsonCompilerPath = normalize.lib('json-compiler/index')
-
-// internal lib loaders
+const templatePreprocessorPath = normalize.lib('template-compiler/preprocessor')
+const wxsLoaderPath = normalize.lib('wxs/wxs-loader')
+const wxmlLoaderPath = normalize.lib('wxml/wxml-loader')
+const wxssLoaderPath = normalize.lib('wxss/loader')
+const config = require('./config')
+const stringifyQuery = require('./utils/stringify-query')
 const selectorPath = normalize.lib('selector')
 const extractorPath = normalize.lib('extractor')
 
@@ -19,14 +23,15 @@ const defaultLang = {
   template: 'html',
   styles: 'css',
   script: 'js',
-  json: 'json'
+  json: 'json',
+  wxs: 'wxs'
 }
 
 const postcssExtensions = [
   'postcss', 'pcss', 'sugarss', 'sss'
 ]
 
-function getRawRequest ({resource, loaderIndex, loaders}, excludedPreLoaders = /eslint-loader/) {
+function getRawRequest ({ resource, loaderIndex, loaders }, excludedPreLoaders = /eslint-loader/) {
   return loaderUtils.getRemainingRequest({
     resource: resource,
     loaderIndex: loaderIndex,
@@ -36,7 +41,7 @@ function getRawRequest ({resource, loaderIndex, loaders}, excludedPreLoaders = /
 
 // sass => sass-loader
 // sass-loader => sass-loader
-// sass?indentedSyntax!css => sass-loader?indentedSyntax!css-loader
+// sass?indentedSyntax!css => sass-loader?indentedSyntax&!css-loader
 function ensureLoader (lang) {
   return lang
     .split('!')
@@ -51,41 +56,38 @@ function ensureLoader (lang) {
 }
 
 function ensureBang (loader) {
-  if (loader.charAt(loader.length - 1) !== '!') {
+  if (loader && loader.charAt(loader.length - 1) !== '!') {
     return loader + '!'
   } else {
     return loader
   }
 }
 
-function resolveLoaders (options, moduleId, isProduction, hasScoped, hasComment, usingComponents, needCssSourceMap) {
+function resolveLoaders (options, moduleId, isProduction, hasScoped, hasComment, usingComponents, needCssSourceMap, projectRoot = '') {
   let cssLoaderOptions = ''
+  let wxmlLoaderOptions = ''
+  let jsonCompilerOptions = ''
   if (needCssSourceMap) {
     cssLoaderOptions += '?sourceMap'
   }
-  if (isProduction) {
-    cssLoaderOptions += (cssLoaderOptions ? '&' : '?') + 'minimize'
-  }
 
-  const templateCompilerOptions =
-    '?' +
-    JSON.stringify({
-      usingComponents,
-      hasComment,
-      moduleId,
-      compileBindEvent: options.compileBindEvent
-    })
+  wxmlLoaderOptions += '?root=' + projectRoot
+  jsonCompilerOptions += '?root=' + projectRoot
+  // 由于css-loader@1.0之后不再支持root，暂时不允许在css中使用/开头的路径，后续迁移至postcss-loader再进行支持
+  // 现在切回css-loader@0.28.11了，先加回来和原生小程序保持一致
+  cssLoaderOptions += (cssLoaderOptions ? '&' : '?') + 'root=' + projectRoot + '&importLoaders=1&extract=true'
 
   const defaultLoaders = {
-    html: 'html-loader?attrs=audio:src image:src video:src cover-image:src' + '!' + templateCompilerPath + templateCompilerOptions,
+    html: wxmlLoaderPath + wxmlLoaderOptions,
     css: getCSSLoaderString(),
     js: hasBabel ? 'babel-loader' : '',
-    json: jsonCompilerPath
+    json: jsonCompilerPath + jsonCompilerOptions,
+    wxs: wxsLoaderPath
   }
 
   function getCSSLoaderString (lang) {
     const langLoader = lang ? ensureBang(ensureLoader(lang)) : ''
-    return 'css-loader' + cssLoaderOptions + '!' + langLoader
+    return ensureBang('css-loader' + cssLoaderOptions) + langLoader
   }
 
   return {
@@ -97,7 +99,7 @@ function resolveLoaders (options, moduleId, isProduction, hasScoped, hasComment,
   }
 }
 
-module.exports = function createHelpers (loaderContext, options, moduleId, parts, isProduction, hasScoped, hasComment, usingComponents, needCssSourceMap) {
+module.exports = function createHelpers (loaderContext, options, moduleId, isProduction, hasScoped, hasComment, usingComponents, needCssSourceMap, srcMode, isNative, projectRoot) {
   const rawRequest = getRawRequest(loaderContext, options.excludedPreLoaders)
   const {
     defaultLoaders,
@@ -112,7 +114,8 @@ module.exports = function createHelpers (loaderContext, options, moduleId, parts
     hasScoped,
     hasComment,
     usingComponents,
-    needCssSourceMap
+    needCssSourceMap,
+    projectRoot
   )
 
   function getRequire (type, part, index, scoped) {
@@ -133,6 +136,22 @@ module.exports = function createHelpers (loaderContext, options, moduleId, parts
     )
   }
 
+  function addQueryMode (request, mode) {
+    if (!mode) {
+      return request
+    }
+    const queryIndex = request.indexOf('?')
+    let query
+    let resource = request
+    if (queryIndex >= 0) {
+      query = request.substr(queryIndex)
+      resource = request.substr(0, queryIndex)
+    }
+    let queryObj = loaderUtils.parseQuery(query || '?')
+    queryObj.mode = mode
+    return resource + stringifyQuery(queryObj)
+  }
+
   function getRequestString (type, part, index, scoped) {
     return loaderUtils.stringifyRequest(
       loaderContext,
@@ -141,34 +160,34 @@ module.exports = function createHelpers (loaderContext, options, moduleId, parts
       // get loader string for pre-processors
       getLoaderString(type, part, index, scoped) +
       // select the corresponding part from the mpx file
-      getSelectorString(type, index || 0) +
+      getSelectorString(type, index) +
       // the url to the actual mpx file, including remaining requests
-      rawRequest
+      addQueryMode(rawRequest, part.mode)
     )
   }
 
-  function getRequireForSrc (type, impt, scoped) {
-    return 'require(' + getSrcRequestString(type, impt, scoped) + ')'
+  function getRequireForSrc (type, impt, index, scoped, prefix, withIssuer) {
+    return 'require(' + getSrcRequestString(type, impt, index, scoped, prefix, withIssuer) + ')'
   }
 
-  function getImportForSrc (type, impt, scoped) {
+  function getImportForSrc (type, impt, index, scoped, prefix) {
     return (
       'import __' + type + '__ from ' +
-      getSrcRequestString(type, impt, scoped)
+      getSrcRequestString(type, impt, index, scoped, prefix)
     )
   }
 
-  function getNamedExportsForSrc (type, impt, scoped) {
+  function getNamedExportsForSrc (type, impt, index, scoped, prefix) {
     return (
       'export * from ' +
-      getSrcRequestString(type, impt, scoped)
+      getSrcRequestString(type, impt, index, scoped, prefix)
     )
   }
 
-  function getSrcRequestString (type, impt, scoped) {
+  function getSrcRequestString (type, impt, index, scoped, prefix = '!', withIssuer) {
     return loaderUtils.stringifyRequest(
       loaderContext,
-      '!!' + getLoaderString(type, impt, -1, scoped) + impt.src
+      prefix + getLoaderString(type, impt, index, scoped, withIssuer) + addQueryMode(impt.src, impt.mode)
     )
   }
 
@@ -179,8 +198,7 @@ module.exports = function createHelpers (loaderContext, options, moduleId, parts
       modules: true
     }
     const OPTIONS = {
-      localIdentName: '[hash:base64]',
-      importLoaders: 1
+      localIdentName: '[hash:base64]'
     }
     return loader.replace(/((?:^|!)css(?:-loader)?)(\?[^!]*)?/, (m, $1, $2) => {
       // $1: !css-loader
@@ -214,11 +232,11 @@ module.exports = function createHelpers (loaderContext, options, moduleId, parts
       .join('!')
   }
 
-  function getLoaderString (type, part, index, scoped) {
+  function getLoaderString (type, part, index, scoped, withIssuer) {
     let loader = getRawLoaderString(type, part, index, scoped)
     const lang = getLangString(type, part)
-    if (type !== 'script') {
-      loader = getExtractorString(type, index || 0) + loader
+    if (type !== 'script' && type !== 'wxs') {
+      loader = getExtractorString(type, index, withIssuer) + loader
     }
     if (preLoaders[lang]) {
       loader = loader + ensureBang(preLoaders[lang])
@@ -229,7 +247,7 @@ module.exports = function createHelpers (loaderContext, options, moduleId, parts
     return loader
   }
 
-  function getLangString (type, {lang}) {
+  function getLangString (type, { lang }) {
     if (type === 'script' || type === 'template' || type === 'styles') {
       return lang || defaultLang[type]
     } else {
@@ -237,23 +255,25 @@ module.exports = function createHelpers (loaderContext, options, moduleId, parts
     }
   }
 
+  function replaceCssLoader (rawLoader) {
+    return rawLoader.replace(/css(?:-loader)?/, wxssLoaderPath)
+  }
+
   function getRawLoaderString (type, part, index, scoped) {
-    let lang = part.lang || defaultLang[type]
+    let lang = (part.lang && part.lang !== config[srcMode].typeExtMap.template.slice(1)) ? part.lang : defaultLang[type]
 
     let styleCompiler = ''
     if (type === 'styles') {
       // style compiler that needs to be applied for all styles
-      styleCompiler =
-        styleCompilerPath +
-        '?' +
+      styleCompiler = styleCompilerPath + '?' +
         JSON.stringify({
           id: moduleId,
           scoped: !!scoped,
           sourceMap: needCssSourceMap,
           transRpx: options.transRpx,
-          comment: options.comment || 'use rpx'
-        }) +
-        '!'
+          comment: options.comment,
+          designWidth: options.designWidth
+        })
       // normalize scss/sass/postcss if no specific loaders have been provided
       if (!loaders[lang]) {
         if (postcssExtensions.indexOf(lang) !== -1) {
@@ -264,6 +284,19 @@ module.exports = function createHelpers (loaderContext, options, moduleId, parts
           lang = 'sass'
         }
       }
+    }
+
+    let templateCompiler = ''
+
+    if (type === 'template') {
+      const templateCompilerOptions = {
+        usingComponents,
+        hasScoped,
+        hasComment,
+        isNative,
+        moduleId
+      }
+      templateCompiler = templateCompilerPath + '?' + JSON.stringify(templateCompilerOptions)
     }
 
     let loader = type === 'styles'
@@ -283,29 +316,33 @@ module.exports = function createHelpers (loaderContext, options, moduleId, parts
         if (rewriterInjectRE.test(loader)) {
           loader = loader.replace(
             rewriterInjectRE,
-            (m, $1) => ensureBang($1) + styleCompiler
+            (m, $1) => ensureBang($1) + ensureBang(styleCompiler)
           )
         } else {
-          loader = ensureBang(loader) + styleCompiler
+          loader = ensureBang(loader) + ensureBang(styleCompiler)
         }
+        loader = replaceCssLoader(loader)
       }
-      // if user defines custom loaders for html, add template compiler to it
-      if (type === 'template' && loader.indexOf(defaultLoaders.html) < 0) {
-        loader = defaultLoaders.html + '!' + loader
+
+      if (type === 'template') {
+        loader = ensureBang(loader) + ensureBang(templateCompiler)
       }
+
       return ensureBang(loader)
     } else {
       // unknown lang, infer the loader to be used
       switch (type) {
         case 'template':
-          return (
-            defaultLoaders.html + '!'
-          )
+          // allow passing options to the template preprocessor via `templateOption` option
+          const preprocessorOption = { engine: lang, templateOption: options.templateOption || {} }
+          const templatePreprocessor = templatePreprocessorPath + '?' + JSON.stringify(preprocessorOption)
+          return ensureBang(defaultLoaders.html) + ensureBang(templateCompiler) + ensureBang(templatePreprocessor)
         case 'styles':
           loader = addCssModulesToLoader(defaultLoaders.css, part, index)
-          return loader + '!' + styleCompiler + ensureBang(ensureLoader(lang))
+          loader = replaceCssLoader(loader)
+          return ensureBang(loader) + ensureBang(styleCompiler) + ensureBang(ensureLoader(lang))
         case 'script':
-          return ensureBang(ensureLoader(lang))
+          return ensureBang(defaultLoaders.js) + ensureBang(ensureLoader(lang))
         default:
           loader = loaders[type]
           if (Array.isArray(loader)) {
@@ -316,118 +353,27 @@ module.exports = function createHelpers (loaderContext, options, moduleId, parts
     }
   }
 
-  function getSelectorString (type, index) {
-    return (
+  function getSelectorString (type, index = 0) {
+    return ensureBang(
       selectorPath +
       '?type=' +
       (type === 'script' || type === 'template' || type === 'styles' || type === 'json'
         ? type
         : 'customBlocks') +
-      '&index=' + index +
-      '!'
+      '&index=' + index
     )
   }
 
-  function getExtractorString (type, index) {
-    return (
+  function getExtractorString (type, index = 0, withIssuer) {
+    return ensureBang(
       extractorPath +
       '?type=' +
       (type === 'script' || type === 'template' || type === 'styles' || type === 'json'
         ? type
         : 'customBlocks') +
       '&index=' + index +
-      '!'
+      (withIssuer ? '&issuerResource=' + loaderContext.resource : '')
     )
-  }
-
-  function validateJsonByType (json, type) {
-    let warnings = []
-
-    if (!json) {
-      // page和component允许json为空，但是app必须有json
-      if (type === 'page' || type === 'component') {
-        return {
-          type: 'success'
-        }
-      } else if (type === 'app') {
-        return {
-          type: 'error',
-          message: 'App entry must have a json field, now is undefined.'
-        }
-      }
-    }
-
-    const knownConfigs = {
-      'app': {
-        'pages': Array,
-        'window': Object,
-        'tooBar': Object,
-        'networkTimeout': Object,
-        'debug': Boolean,
-        'plugins': Object
-      },
-      'component': {
-        'component': Boolean,
-        'usingComponents': Object
-      },
-      'page': {
-        'navigationBarBackgroundColor': String,
-        'navigationBarTextStyle': String,
-        'navigationBarTitleText': String,
-        'navigationStyle': String,
-        'backgroundColor': String,
-        'backgroundTextStyle': String,
-        'backgroundColorTop': String,
-        'backgroundColorBottom': String,
-        'enablePullDownRefresh': String,
-        'onReachBottomDistance': String,
-        'usingComponents': Object
-      }
-    }
-
-    if (!(type in knownConfigs)) {
-      return {
-        type: 'success'
-      }
-    }
-
-    let config = knownConfigs[type]
-
-    let jsonObj
-    try {
-      jsonObj = JSON.parse(json.content)
-    } catch (e) {
-      return {
-        type: 'error',
-        message: 'fail to parse'
-      }
-    }
-
-    if (typeof jsonObj !== 'object') {
-      return {
-        type: 'error',
-        message: 'invalid format, config should be Object'
-      }
-    }
-
-    for (let i in jsonObj) {
-      if (!(i in config)) {
-        warnings.push({
-          type: 'warn',
-          message: `Maybe config [${i}] is not a valid weixin miniapp config.`
-        })
-      } else {
-        let currentType = Object.prototype.toString.call(jsonObj[i]).slice(8, -1)
-        let configType = config[i].name
-        if (currentType !== configType) {
-          return {
-            type: 'error',
-            message: `Expect the type of config [${i}] to be ${configType} but got ${currentType}`
-          }
-        }
-      }
-    }
-    return warnings
   }
 
   return {
@@ -439,7 +385,6 @@ module.exports = function createHelpers (loaderContext, options, moduleId, parts
     getImportForSrc,
     getNamedExportsForSrc,
     getRequestString,
-    getSrcRequestString,
-    validateJsonByType
+    getSrcRequestString
   }
 }

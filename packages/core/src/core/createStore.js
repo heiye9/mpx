@@ -1,20 +1,33 @@
 import {
   observable,
-  computed,
   action,
   extendObservable
 } from 'mobx'
-import { proxy, getByPath } from '../helper/utils'
+
+import {
+  proxy,
+  getByPath,
+  defineGetterSetter
+} from '../helper/utils'
+
 import mapStore from './mapStore'
+
 function transformGetters (getters, module, store) {
   const newGetters = {}
   for (let key in getters) {
     if (key in store.getters) {
-      console.warn(new Error(`duplicate getter type: ${key}`))
+      console.warn('【MPX ERROR】', new Error(`duplicate getter type: ${key}`))
     }
-    newGetters[key] = typeof getters[key] === 'function' ? computed(function () {
+    defineGetterSetter(newGetters, key, function () {
+      if (store.withThis) {
+        return getters[key].call({
+          state: module.state,
+          getters: module.getters,
+          rootState: store.state
+        })
+      }
       return getters[key](module.state, store.getters, store.state)
-    }) : getters[key]
+    })
   }
   return newGetters
 }
@@ -23,11 +36,12 @@ function transformMutations (mutations, module, store) {
   const newMutations = {}
   for (let key in mutations) {
     if (store.mutations[key]) {
-      console.warn(new Error(`duplicate mutation type: ${key}`))
+      console.warn('【MPX ERROR】', new Error(`duplicate mutation type: ${key}`))
     }
-    newMutations[key] = typeof mutations[key] === 'function' ? action(function (...payload) {
+    newMutations[key] = action(function (...payload) {
+      if (store.withThis) return mutations[key].apply({ state: module.state }, payload)
       return mutations[key](module.state, ...payload)
-    }) : mutations[key]
+    })
   }
   return newMutations
 }
@@ -36,49 +50,55 @@ function transformActions (actions, module, store) {
   const newActions = {}
   for (let key in actions) {
     if (store.actions[key]) {
-      console.warn(new Error(`duplicate action type: ${key}`))
+      console.warn('【MPX ERROR】', new Error(`duplicate action type: ${key}`))
     }
-    newActions[key] = typeof actions[key] === 'function' ? function (...payload) {
-      const result = actions[key]({
+    newActions[key] = function (...payload) {
+      const context = {
         rootState: store.state,
         state: module.state,
         getters: store.getters,
         dispatch: store.dispatch.bind(store),
         commit: store.commit.bind(store)
-      }, ...payload)
+      }
+
+      let result
+      if (store.withThis) {
+        result = actions[key].apply(context, payload)
+      } else {
+        result = actions[key](context, ...payload)
+      }
       // action一定返回一个promise
       if (result && typeof result.then === 'function' && typeof result.catch === 'function') {
         return result
       } else {
         return Promise.resolve(result)
       }
-    } : actions[key]
+    }
   }
   return newActions
 }
 
-function mergeDeps (options) {
-  const stores = options.deps
-  if (!stores) return options
+function mergeDeps (module, deps, getterKeys) {
   const mergeProps = ['state', 'getters', 'mutations', 'actions']
-  Object.keys(stores).forEach(key => {
-    const store = stores[key]
+  Object.keys(deps).forEach(key => {
+    const store = deps[key]
     mergeProps.forEach(prop => {
-      if (options[prop] && (key in options[prop])) {
-        console.warn(new Error(`deps's name: [${key}] conflicts with ${prop}'s key in current options`))
+      if (module[prop] && (key in module[prop])) {
+        console.warn('【MPX ERROR】', new Error(`deps's name: [${key}] conflicts with ${prop}'s key in current options`))
       } else {
-        options[prop] = options[prop] || {}
-        options[prop][key] = store[prop]
+        module[prop] = module[prop] || {}
+        prop === 'getters' && getterKeys.push(key)
+        prop === 'state' ? extendObservable(module[prop], {
+          [key]: store[prop]
+        }) : (module[prop][key] = store[prop])
       }
     })
   })
-  delete options.deps
-  return options
 }
 
 class Store {
   constructor (options) {
-    options = mergeDeps(options)
+    this.withThis = options.withThis
     this.getters = {}
     this.mutations = {}
     this.actions = {}
@@ -98,30 +118,38 @@ class Store {
   commit (type, ...payload) {
     const mutation = getByPath(this.mutations, type)
     if (!mutation) {
-      console.warn(new Error(`unknown mutation type: ${type}`))
+      console.warn('【MPX ERROR】', new Error(`unknown mutation type: ${type}`))
     } else {
       return mutation(...payload)
     }
   }
 
   registerModule (module) {
-    const reactiveModuleOption = {
-      state: module.state || {}
+    const getterKeys = []
+    const reactiveModule = {
+      state: observable(module.state || {})
     }
-    const reactiveModule = observable(reactiveModuleOption)
     if (module.getters) {
-      extendObservable(reactiveModule, {
-        getters: transformGetters(module.getters, reactiveModule, this)
-      })
-      // 使用proxy，保证store.getters的属性是可观察的
-      proxy(this.getters, reactiveModule.getters, Object.keys(module.getters), true)
+      // mobx计算属性是不可枚举的，所以单独收集
+      getterKeys.push.apply(getterKeys, Object.keys(module.getters))
+      reactiveModule.getters = observable(transformGetters(module.getters, reactiveModule, this))
     }
     if (module.mutations) {
-      Object.assign(this.mutations, transformMutations(module.mutations, reactiveModule, this))
+      reactiveModule.mutations = transformMutations(module.mutations, reactiveModule, this)
     }
     if (module.actions) {
-      Object.assign(this.actions, transformActions(module.actions, reactiveModule, this))
+      reactiveModule.actions = transformActions(module.actions, reactiveModule, this)
     }
+    if (module.deps) {
+      mergeDeps(reactiveModule, module.deps, getterKeys)
+    }
+    // merge getters, 不能用Object.assign，会导致直接执行一次getter函数
+    reactiveModule.getters && proxy(this.getters, reactiveModule.getters, getterKeys, true)
+    // merge mutations
+    Object.assign(this.mutations, reactiveModule.mutations)
+    // merge actions
+    Object.assign(this.actions, reactiveModule.actions)
+    // 子module
     if (module.modules) {
       const childs = module.modules
       Object.keys(childs).forEach(key => {
@@ -135,5 +163,10 @@ class Store {
 }
 
 export default function createStore (options) {
+  return new Store(options)
+}
+
+export function createStoreWithThis (options) {
+  options.withThis = true
   return new Store(options)
 }

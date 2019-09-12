@@ -1,8 +1,8 @@
+import { INNER_LIFECYCLES } from './innerLifecycle'
 export default [
   'proto',
   'mixins',
   'watch',
   'computed',
-  'forceDiffKeys',
-  'deepDiff'
-]
+  'mpxCustomKeysForBlend'
+].concat(INNER_LIFECYCLES)

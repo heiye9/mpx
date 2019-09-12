@@ -40,13 +40,16 @@ module.exports = function generate (name, src, dest, done) {
     noEscape: true
   })
 
-  const helpers = {chalk, logger}
+  const helpers = { chalk, logger }
 
   if (opts.metalsmith && typeof opts.metalsmith.before === 'function') {
     opts.metalsmith.before(metalsmith, opts, helpers)
   }
 
-  metalsmith.use(askQuestions(opts.prompts))
+  (opts.mock
+    ? metalsmith.use(mock(opts.mock))
+    : metalsmith.use(askQuestions(opts.prompts)))
+    .use(computed(opts.computed))
     .use(filterFiles(opts.filters))
     .use(renderTemplateFiles(opts.skipInterpolation))
 
@@ -62,7 +65,7 @@ module.exports = function generate (name, src, dest, done) {
     .build((err, files) => {
       done(err)
       if (typeof opts.complete === 'function') {
-        const helpers = {chalk, logger, files}
+        const helpers = { chalk, logger, files }
         opts.complete(data, helpers)
       } else {
         logMessage(opts.completeMessage, data)
@@ -83,6 +86,41 @@ function askQuestions (prompts) {
   return (files, metalsmith, done) => {
     ask(prompts, metalsmith.metadata(), done)
   }
+}
+
+function mock (mock) {
+  return (files, metalsmith, done) => {
+    processMock(mock, metalsmith.metadata(), done)
+  }
+}
+
+function processMock (mock, data, done) {
+  if (!mock) {
+    return done()
+  }
+  Object.assign(data, mock)
+  done()
+}
+
+function computed (computed) {
+  return (files, metalsmith, done) => {
+    processComputed(computed, metalsmith.metadata(), done)
+  }
+}
+
+function processComputed (computed, data, done) {
+  if (!computed) {
+    return done()
+  }
+  Object.keys(computed).forEach((key) => {
+    Object.defineProperty(data, key, {
+      get () {
+        return computed[key].call(data)
+      },
+      enumerable: true
+    })
+  })
+  done()
 }
 
 /**
@@ -115,7 +153,7 @@ function renderTemplateFiles (skipInterpolation) {
     const metalsmithMetadata = metalsmith.metadata()
     async.each(keys, (file, next) => {
       // skipping files with skipInterpolation option
-      if (skipInterpolation && multimatch([file], skipInterpolation, {dot: true}).length) {
+      if (skipInterpolation && multimatch([file], skipInterpolation, { dot: true }).length) {
         return next()
       }
       const str = files[file].contents.toString()
@@ -124,7 +162,7 @@ function renderTemplateFiles (skipInterpolation) {
           err.message = `[${file}] ${err.message}`
           return next(err)
         }
-        files[file].contents = new Buffer(res)
+        files[file].contents = Buffer.from(res)
         next()
       })
     }, done)

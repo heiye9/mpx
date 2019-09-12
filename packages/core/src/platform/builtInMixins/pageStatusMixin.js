@@ -1,35 +1,74 @@
-export default function pageStatusMixin (mixinType, options) {
-  if (mixinType === 'page' || options.page) {
-    return {
+import { is } from '../../helper/env'
+
+export default function pageStatusMixin (mixinType) {
+  if (mixinType === 'page') {
+    let pageMixin = {
       data: {
-        __pageStatus: 'show'
+        mpxPageStatus: 'show'
       },
       onShow () {
-        this.__pageStatus = 'show'
+        this.mpxPageStatus = 'show'
       },
       onHide () {
-        this.__pageStatus = 'hide'
+        this.mpxPageStatus = 'hide'
       }
     }
-  } else {
-    return {
-      properties: {
-        __pageStatus: {
-          type: String
+    if (is('ali')) {
+      Object.assign(pageMixin, {
+        events: {
+          onResize (e) {
+            this.__mpxWindowSizeEvent = e
+            this.mpxPageStatus = 'resize'
+          }
         }
-      },
-      watch: {
-        __pageStatus: {
-          handler (val) {
-            if (val) {
-              const rawOptions = this.$rawOptions
-              const callback = val === 'show'
-                ? rawOptions.pageShow
-                : rawOptions.pageHide
-              typeof callback === 'function' && callback.call(this)
-            }
-          },
-          immediate: true
+      })
+    }
+    return pageMixin
+  } else {
+    if (is('ali')) {
+      return {
+        watch: {
+          '$page.mpxPageStatus': {
+            handler (val) {
+              if (val) {
+                const rawOptions = this.$rawOptions
+                let callback = () => {}
+                if (val === 'show') callback = rawOptions.pageShow
+                if (val === 'hide') callback = rawOptions.pageHide
+                typeof callback === 'function' && callback.call(this)
+              }
+              // 让支付宝支持pageLifetimes
+              const pageLifetimes = this.$rawOptions.pageLifetimes
+              if (pageLifetimes) {
+                if (val === 'show' && typeof pageLifetimes.show === 'function') pageLifetimes.show.call(this)
+                if (val === 'hide' && typeof pageLifetimes.hide === 'function') pageLifetimes.hide.call(this)
+                if (val === 'resize' && typeof pageLifetimes.resize === 'function') pageLifetimes.resize.call(this, this.__mpxWindowSizeEvent)
+              }
+            },
+            immediate: true
+          }
+        }
+      }
+    } else {
+      return {
+        properties: {
+          mpxPageStatus: {
+            type: String
+          }
+        },
+        watch: {
+          mpxPageStatus: {
+            handler (val) {
+              if (val) {
+                const rawOptions = this.$rawOptions
+                let callback = () => {}
+                if (val === 'show') callback = rawOptions.pageShow
+                if (val === 'hide') callback = rawOptions.pageHide
+                typeof callback === 'function' && callback.call(this)
+              }
+            },
+            immediate: true
+          }
         }
       }
     }

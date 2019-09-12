@@ -1,18 +1,82 @@
 import {
-  isObservableArray
+  isObservableArray,
+  isObservableMap,
+  isObservable,
+  get,
+  toJS
 } from 'mobx'
+
+import _getByPath from './getByPath'
 
 export function type (n) {
   return Object.prototype.toString.call(n).slice(8, -1)
 }
 
-export function normalizeMap (arr) {
-  if (type(arr) === 'Array') {
+export function asyncLock () {
+  let lock = false
+  return (fn, onerror) => {
+    if (!lock) {
+      lock = true
+      Promise.resolve().then(() => {
+        lock = false
+        typeof fn === 'function' && fn()
+      }).catch(e => {
+        lock = false
+        console.error(e)
+        typeof onerror === 'function' && onerror()
+      })
+    }
+  }
+}
+
+export function aliasReplace (options = {}, alias, target) {
+  if (options[alias]) {
+    const dataType = type(options[alias])
+    switch (dataType) {
+      case 'Object':
+        options[target] = Object.assign({}, options[alias], options[target])
+        break
+      case 'Array':
+        options[target] = options[alias].concat(options[target] || [])
+        break
+      default:
+        options[target] = options[alias]
+        break
+    }
+    delete options[alias]
+  }
+  return options
+}
+
+export function findItem (arr = [], key) {
+  for (const item of arr) {
+    if ((type(key) === 'RegExp' && key.test(item)) || item === key) {
+      return true
+    }
+  }
+  return false
+}
+
+export function normalizeMap (prefix, arr) {
+  if (typeof prefix !== 'string') {
+    arr = prefix
+    prefix = ''
+  }
+  const objType = type(arr)
+  if (objType === 'Array') {
     const map = {}
     arr.forEach(value => {
-      map[value] = value
+      map[value] = prefix ? `${prefix}.${value}` : value
     })
     return map
+  }
+  if (prefix && objType === 'Object') {
+    arr = Object.assign({}, arr)
+    Object.keys(arr).forEach(key => {
+      if (typeof arr[key] === 'string') {
+        arr[key] = `${prefix}.${arr[key]}`
+      }
+    })
   }
   return arr
 }
@@ -29,37 +93,64 @@ export function isExistAttr (obj, attr) {
   }
 }
 
-export function getByPath (data, pathStr, notExistOutput) {
-  if (!pathStr) return data
-  const path = pathStr.split('.')
-  let notExist = false
-  let value = data
-  for (let key of path) {
-    if (isExistAttr(value, key)) {
-      value = value[key]
-    } else {
-      value = undefined
-      notExist = true
-      break
+export function setByPath (data, pathStr, value) {
+  let parent
+  let variable
+  _getByPath(data, pathStr, (value, key, end) => {
+    if (end) {
+      parent = value
+      variable = key
     }
-  }
-  if (notExistOutput) {
-    return notExist ? notExistOutput : value
-  } else {
-    // 小程序setData时不允许undefined数据
-    return value === undefined ? '' : value
+    return value[key]
+  })
+  if (parent) {
+    parent[variable] = value
   }
 }
 
-export function enumerable (target, keys) {
-  keys.forEach(key => {
-    const descriptor = Object.getOwnPropertyDescriptor(target, key)
-    if (!descriptor.enumerable) {
-      descriptor.enumerable = true
-      Object.defineProperty(target, key, descriptor)
-    }
+export function getByPath (data, pathStr, defaultVal = '', errTip) {
+  const results = []
+  pathStr.split(',').forEach(item => {
+    const path = item.trim()
+    if (!path) return
+    const result = _getByPath(data, path, (value, key) => {
+      let newValue
+      if (isObservable(value)) {
+        // key可能不是一个响应式属性，那么get将无法返回正确值
+        newValue = get(value, key) || value[key]
+      } else if (isExistAttr(value, key)) {
+        newValue = value[key]
+      } else {
+        newValue = errTip
+      }
+      return newValue
+    })
+    // 小程序setData时不允许undefined数据
+    results.push(result === undefined ? defaultVal : result)
   })
-  return target
+  return results.length > 1 ? results : results[0]
+}
+
+export function defineGetterSetter (target, key, getValue, setValue, context) {
+  let get
+  let set
+  if (typeof getValue === 'function') {
+    get = context ? getValue.bind(context) : getValue
+  } else {
+    get = function () {
+      return getValue
+    }
+  }
+  if (typeof setValue === 'function') {
+    set = context ? setValue.bind(context) : setValue
+  }
+  let descriptor = {
+    get,
+    configurable: true,
+    enumerable: true
+  }
+  if (set) descriptor.set = set
+  Object.defineProperty(target, key, descriptor)
 }
 
 export function proxy (target, source, keys, mapKeys, readonly) {
@@ -83,15 +174,14 @@ export function proxy (target, source, keys, mapKeys, readonly) {
   return target
 }
 
-export function deleteProperties (source, props = []) {
-  if (!props.length) return source
-  const sourceKeys = Object.keys(source)
+export function filterProperties (source, props = []) {
   const newData = {}
-  for (let key of sourceKeys) {
-    if (props.indexOf(key) < 0) {
-      newData[key] = source[key]
+  props.forEach(prop => {
+    if (prop in source) {
+      const result = source[prop]
+      newData[prop] = isObservable(result) ? toJS(result) : result
     }
-  }
+  })
   return newData
 }
 
@@ -255,6 +345,9 @@ export function normalizeDynamicStyle (value) {
 }
 
 export function isEmptyObject (obj) {
+  if (!obj) {
+    return true
+  }
   for (let key in obj) {
     return false
   }
@@ -273,4 +366,160 @@ export function processUndefined (obj) {
     }
   }
   return result
+}
+
+function unwrap (a) {
+  if (isObservableArray(a)) {
+    return a.peek()
+  }
+  if (isObservableMap(a)) {
+    return a.entries()
+  }
+  return a
+}
+
+export function noop () {
+
+}
+
+export function diffAndCloneA (a, b) {
+  const diffPaths = []
+  const curPath = []
+  let diff = false
+
+  function deepDiffAndCloneA (a, b, currentDiff) {
+    const setDiff = (val) => {
+      if (currentDiff) return
+      if (val) {
+        currentDiff = val
+        diffPaths.push(curPath.slice())
+      }
+    }
+
+    const toString = Object.prototype.toString
+    const type = typeof a
+    let clone = a
+
+    if (type !== 'object' || a === null) {
+      setDiff(a !== b)
+    } else {
+      a = unwrap(a)
+      b = unwrap(b)
+      let sameClass = true
+
+      const className = toString.call(a)
+      if (className !== toString.call(b)) {
+        setDiff(true)
+        sameClass = false
+      }
+      let length
+      switch (className) {
+        case '[object RegExp]':
+        case '[object String]':
+          if (sameClass) setDiff('' + a !== '' + b)
+          break
+        case '[object Number]':
+        case '[object Date]':
+        case '[object Boolean]':
+          if (sameClass) setDiff(+a !== +b)
+          break
+        case '[object Symbol]':
+          if (sameClass) setDiff(a !== b)
+          break
+        case '[object Array]':
+          length = a.length
+          if (sameClass && length !== b.length) {
+            setDiff(true)
+          }
+          clone = []
+          for (let i = 0; i < length; i++) {
+            curPath.push(i)
+            clone[i] = deepDiffAndCloneA(a[i], sameClass ? b[i] : undefined, currentDiff)
+            curPath.pop()
+          }
+          break
+        default:
+          let keys = Object.keys(a)
+          let key
+          length = keys.length
+          if (sameClass && length !== Object.keys(b).length) {
+            setDiff(true)
+          }
+          clone = {}
+          for (let i = 0; i < length; i++) {
+            key = keys[i]
+            curPath.push(key)
+            clone[key] = deepDiffAndCloneA(a[key], sameClass ? b[key] : undefined, currentDiff)
+            curPath.pop()
+          }
+      }
+    }
+    if (currentDiff) {
+      diff = currentDiff
+    }
+    return clone
+  }
+
+  let clone = deepDiffAndCloneA(a, b, diff)
+
+  return {
+    clone,
+    diff,
+    diffPaths
+  }
+}
+
+export function isValidIdentifierStr (str) {
+  return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(str)
+}
+
+export function isNumberStr (str) {
+  return /^\d+$/.test(str)
+}
+
+let datasetReg = /^data-(.+)$/
+
+export function collectDataset (props) {
+  let dataset = {}
+  for (let key in props) {
+    if (props.hasOwnProperty(key)) {
+      let matched = datasetReg.exec(key)
+      if (matched) {
+        dataset[matched[1]] = props[key]
+      }
+    }
+  }
+  return dataset
+}
+
+/**
+ * process renderData, remove sub node if visit parent node already
+ * @param {Object} renderData
+ * @return {Object} processedRenderData
+ */
+export function preprocessRenderData (renderData) {
+  // method for get key path array
+  const processKeyPathMap = (keyPathMap) => {
+    let keyPath = Object.keys(keyPathMap)
+    return keyPath.filter((keyA) => {
+      return keyPath.every((keyB) => {
+        if (keyA.startsWith(keyB) && keyA !== keyB) {
+          let nextChar = keyA[keyB.length]
+          if (nextChar === '.' || nextChar === '[') {
+            return false
+          }
+        }
+        return true
+      })
+    })
+  }
+
+  const processedRenderData = {}
+  const renderDataFinalKey = processKeyPathMap(renderData)
+  Object.keys(renderData).forEach(item => {
+    if (renderDataFinalKey.indexOf(item) > -1) {
+      processedRenderData[item] = renderData[item]
+    }
+  })
+  return processedRenderData
 }

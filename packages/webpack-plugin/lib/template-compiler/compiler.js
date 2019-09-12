@@ -1,15 +1,21 @@
 const deindent = require('de-indent')
 const he = require('he')
 const config = require('../config')
+const normalize = require('../utils/normalize')
+const isValidIdentifierStr = require('../utils/is-valid-identifier-str')
+const isEmptyObject = require('../utils/is-empty-object')
+const mpxJSON = require('../utils/mpx-json')
+const getRulesRunner = require('../platform/index')
+const addQuery = require('../utils/add-query')
 
 /**
  * Make a map and return a function for checking if a key
  * is in that map.
  */
 function makeMap (str, expectsLowerCase) {
-  var map = Object.create(null)
-  var list = str.split(',')
-  for (var i = 0; i < list.length; i++) {
+  let map = Object.create(null)
+  let list = str.split(',')
+  for (let i = 0; i < list.length; i++) {
     map[list[i]] = true
   }
   return expectsLowerCase
@@ -21,13 +27,13 @@ function makeMap (str, expectsLowerCase) {
     }
 }
 
-var no = function (a, b, c) {
+let no = function (a, b, c) {
   return false
 }
 
 // HTML5 tags https://html.spec.whatwg.org/multipage/indices.html#elements-3
 // Phrasing Content https://html.spec.whatwg.org/multipage/dom.html#phrasing-content
-var isNonPhrasingTag = makeMap(
+let isNonPhrasingTag = makeMap(
   'address,article,aside,base,blockquote,body,caption,col,colgroup,dd,' +
   'details,dialog,div,dl,dt,fieldset,figcaption,figure,footer,form,' +
   'h1,h2,h3,h4,h5,h6,head,header,hgroup,hr,html,legend,li,menuitem,meta,' +
@@ -43,26 +49,26 @@ var isNonPhrasingTag = makeMap(
  */
 
 // Regular Expressions for parsing tags and attributes
-var attribute = /^\s*([^\s"'<>/=]+)(?:\s*(=)\s*(?:"([^"]*)"+|'([^']*)'+|([^\s"'=<>`]+)))?/
-var ncname = '[a-zA-Z_][\\w\\-\\.]*'
-var qnameCapture = '((?:' + ncname + '\\:)?' + ncname + ')'
-var startTagOpen = new RegExp(('^<' + qnameCapture))
-var startTagClose = /^\s*(\/?)>/
-var endTag = new RegExp(('^<\\/' + qnameCapture + '[^>]*>'))
-var doctype = /^<!DOCTYPE [^>]+>/i
-var comment = /^<!--/
-var conditionalComment = /^<!\[/
+let attribute = /^\s*([^\s"'<>/=]+)(?:\s*(=)\s*(?:"([^"]*)"+|'([^']*)'+|([^\s"'=<>`]+)))?/
+let ncname = '[a-zA-Z_][\\w\\-\\.]*'
+let qnameCapture = '((?:' + ncname + '\\:)?' + ncname + ')'
+let startTagOpen = new RegExp(('^<' + qnameCapture))
+let startTagClose = /^\s*(\/?)>/
+let endTag = new RegExp(('^<\\/' + qnameCapture + '[^>]*>'))
+let doctype = /^<!DOCTYPE [^>]+>/i
+let comment = /^<!--/
+let conditionalComment = /^<!\[/
 
-var IS_REGEX_CAPTURING_BROKEN = false
+let IS_REGEX_CAPTURING_BROKEN = false
 'x'.replace(/x(.)?/g, function (m, g) {
   IS_REGEX_CAPTURING_BROKEN = g === ''
 })
 
 // Special Elements (can contain anything)
-var isPlainTextElement = makeMap('script,style,textarea', true)
-var reCache = {}
+let isPlainTextElement = makeMap('script,style,textarea', true)
+let reCache = {}
 
-var decodingMap = {
+let decodingMap = {
   '&lt;': '<',
   '&gt;': '>',
   '&quot;': '"',
@@ -70,34 +76,66 @@ var decodingMap = {
   '&#10;': '\n',
   '&#9;': '\t'
 }
-var encodedAttr = /&(?:lt|gt|quot|amp);/g
-var encodedAttrWithNewLines = /&(?:lt|gt|quot|amp|#10|#9);/g
+let encodedAttr = /&(?:lt|gt|quot|amp);/g
+let encodedAttrWithNewLines = /&(?:lt|gt|quot|amp|#10|#9);/g
 
 // #5992
-var isIgnoreNewlineTag = makeMap('pre,textarea', true)
-var shouldIgnoreFirstNewline = function (tag, html) {
+let isIgnoreNewlineTag = makeMap('pre,textarea', true)
+let shouldIgnoreFirstNewline = function (tag, html) {
   return tag && isIgnoreNewlineTag(tag) && html[0] === '\n'
 }
 
 function decodeAttr (value, shouldDecodeNewlines) {
-  var re = shouldDecodeNewlines ? encodedAttrWithNewLines : encodedAttr
+  let re = shouldDecodeNewlines ? encodedAttrWithNewLines : encodedAttr
   return value.replace(re, function (match) {
     return decodingMap[match]
   })
 }
 
-var splitRE = /\r?\n/g
-var replaceRE = /./g
-var isSpecialTag = makeMap('script,style,template', true)
+const encodingMap = Object.keys(decodingMap)
+  .reduce((acc, k) => {
+    const v = decodingMap[k]
+    acc[v] = k
+    return acc
+  }, {})
 
-var ieNSBug = /^xmlns:NS\d+/
-var ieNSPrefix = /^NS\d+:/
+const decodedAttr = /[<>"&]/g
+const decodedAttrWithNewLines = /[<>"&\n\t]/g
+
+const tagRES = /(\{\{(?:.|\n)+?\}\})(?!})/
+
+// eslint-disable-next-line no-unused-vars
+function encodeAttr (value, shouldDecodeNewlines) {
+  const sArr = value.split(tagRES)
+  const re = shouldDecodeNewlines ? decodedAttrWithNewLines : decodedAttr
+  const ret = sArr.map((s) => {
+    if (!tagRES.test(s)) {
+      // 对于属性值且Mustache外的值需要encode，否则序列化时会破坏模板合法性
+      return s.replace(re, (match) => {
+        return encodingMap[match]
+      })
+    } else if (mode === 'ali' || mode === 'qq') {
+      // fix支付宝和qq
+      return s.replace(/["']/g, '\'')
+    } else {
+      return s
+    }
+  })
+  return ret.join('')
+}
+
+const splitRE = /\r?\n/g
+const replaceRE = /./g
+const isSpecialTag = makeMap('script,style,template,json', true)
+
+let ieNSBug = /^xmlns:NS\d+/
+let ieNSPrefix = /^NS\d+:/
 
 /* istanbul ignore next */
 function guardIESVGBug (attrs) {
-  var res = []
-  for (var i = 0; i < attrs.length; i++) {
-    var attr = attrs[i]
+  let res = []
+  for (let i = 0; i < attrs.length; i++) {
+    let attr = attrs[i]
     if (!ieNSBug.test(attr.name)) {
       attr.name = attr.name.replace(ieNSPrefix, '')
       res.push(attr)
@@ -107,12 +145,9 @@ function guardIESVGBug (attrs) {
 }
 
 function makeAttrsMap (attrs) {
-  var map = {}
-  for (var i = 0, l = attrs.length; i < l; i++) {
-    if (
-      process.env.NODE_ENV !== 'production' &&
-      map[attrs[i].name] && !isIE && !isEdge
-    ) {
+  let map = {}
+  for (let i = 0, l = attrs.length; i < l; i++) {
+    if (map[attrs[i].name] && !isIE && !isEdge) {
       warn$1('duplicate attribute: ' + attrs[i].name)
     }
     map[attrs[i].name] = attrs[i].value
@@ -146,46 +181,88 @@ function isForbiddenTag (el) {
 }
 
 function cached (fn) {
-  var cache = Object.create(null)
+  let cache = Object.create(null)
   return function cachedFn (str) {
-    var hit = cache[str]
+    let hit = cache[str]
     return hit || (cache[str] = fn(str))
   }
 }
 
-var decodeHTMLCached = cached(he.decode)
+let decodeHTMLCached = cached(he.decode)
 
 // Browser environment sniffing
-var inBrowser = typeof window !== 'undefined'
-var UA = inBrowser && window.navigator.userAgent.toLowerCase()
-var isIE = UA && /msie|trident/.test(UA)
-var isEdge = UA && UA.indexOf('edge/') > 0
+let inBrowser = typeof window !== 'undefined'
+let UA = inBrowser && window.navigator.userAgent.toLowerCase()
+let isIE = UA && /msie|trident/.test(UA)
+let isEdge = UA && UA.indexOf('edge/') > 0
 
 // configurable state
-var warn$1
-var mode
-var platformGetTagNamespace
+// 由于template处理为纯同步过程，采用闭包变量存储各种状态方便全局访问
+let warn$1
+let error$1
+let mode
+let srcMode
+let processingTemplate
+let isNative
+let rulesRunner
+let currentEl
+let injectNodes = []
+let forScopes = []
+let forScopesMap = {}
+
+function updateForScopesMap () {
+  forScopes.forEach((scope) => {
+    forScopesMap[scope.index] = 'index'
+    forScopesMap[scope.item] = 'item'
+  })
+  return forScopesMap
+}
+
+function pushForScopes (scope) {
+  forScopes.push(scope)
+  updateForScopesMap()
+  return scope
+}
+
+function popForScopes () {
+  let scope = forScopes.pop()
+  updateForScopesMap()
+  return scope
+}
+
+const rulesResultMap = new Map()
+const deleteErrorInResultMap = (node) => {
+  rulesResultMap.delete(node)
+  Array.isArray(node.children) && node.children.forEach(item => deleteErrorInResultMap(item))
+}
+let platformGetTagNamespace
+let basename
+let refId = 0
 
 function baseWarn (msg) {
+  console.warn(('[template compiler]: ' + msg))
+}
+
+function baseError (msg) {
   console.error(('[template compiler]: ' + msg))
 }
 
 function parseHTML (html, options) {
-  var stack = []
-  var expectHTML = options.expectHTML
-  var isUnaryTag$$1 = options.isUnaryTag || no
-  var canBeLeftOpenTag$$1 = options.canBeLeftOpenTag || no
-  var index = 0
-  var last, lastTag
+  let stack = []
+  let expectHTML = options.expectHTML
+  let isUnaryTag$$1 = options.isUnaryTag || no
+  let canBeLeftOpenTag$$1 = options.canBeLeftOpenTag || no
+  let index = 0
+  let last, lastTag
   while (html) {
     last = html
     // Make sure we're not in a plaintext content element like script/style
     if (!lastTag || !isPlainTextElement(lastTag)) {
-      var textEnd = html.indexOf('<')
+      let textEnd = html.indexOf('<')
       if (textEnd === 0) {
         // Comment:
         if (comment.test(html)) {
-          var commentEnd = html.indexOf('-->')
+          let commentEnd = html.indexOf('-->')
 
           if (commentEnd >= 0) {
             if (options.shouldKeepComment) {
@@ -198,7 +275,7 @@ function parseHTML (html, options) {
 
         // http://en.wikipedia.org/wiki/Conditional_comment#Downlevel-revealed_conditional_comment
         if (conditionalComment.test(html)) {
-          var conditionalEnd = html.indexOf(']>')
+          let conditionalEnd = html.indexOf(']>')
 
           if (conditionalEnd >= 0) {
             advance(conditionalEnd + 2)
@@ -207,23 +284,23 @@ function parseHTML (html, options) {
         }
 
         // Doctype:
-        var doctypeMatch = html.match(doctype)
+        let doctypeMatch = html.match(doctype)
         if (doctypeMatch) {
           advance(doctypeMatch[0].length)
           continue
         }
 
         // End tag:
-        var endTagMatch = html.match(endTag)
+        let endTagMatch = html.match(endTag)
         if (endTagMatch) {
-          var curIndex = index
+          let curIndex = index
           advance(endTagMatch[0].length)
           parseEndTag(endTagMatch[1], curIndex, index)
           continue
         }
 
         // Start tag:
-        var startTagMatch = parseStartTag()
+        let startTagMatch = parseStartTag()
         if (startTagMatch) {
           handleStartTag(startTagMatch)
           if (shouldIgnoreFirstNewline(lastTag, html)) {
@@ -233,9 +310,9 @@ function parseHTML (html, options) {
         }
       }
 
-      var text = (void 0)
-      var rest = (void 0)
-      var next = (void 0)
+      let text = (void 0)
+      let rest = (void 0)
+      let next = (void 0)
       if (textEnd >= 0) {
         rest = html.slice(textEnd)
         while (!endTag.test(rest) && !startTagOpen.test(rest) && !comment.test(rest) && !conditionalComment.test(rest)) {
@@ -260,10 +337,10 @@ function parseHTML (html, options) {
         options.chars(text)
       }
     } else {
-      var endTagLength = 0
-      var stackedTag = lastTag.toLowerCase()
-      var reStackedTag = reCache[stackedTag] || (reCache[stackedTag] = new RegExp('([\\s\\S]*?)(</' + stackedTag + '[^>]*>)', 'i'))
-      var rest$1 = html.replace(reStackedTag, function (all, text, endTag) {
+      let endTagLength = 0
+      let stackedTag = lastTag.toLowerCase()
+      let reStackedTag = reCache[stackedTag] || (reCache[stackedTag] = new RegExp('([\\s\\S]*?)(</' + stackedTag + '[^>]*>)', 'i'))
+      let rest$1 = html.replace(reStackedTag, function (all, text, endTag) {
         endTagLength = endTag.length
         if (!isPlainTextElement(stackedTag) && stackedTag !== 'noscript') {
           text = text
@@ -285,7 +362,7 @@ function parseHTML (html, options) {
 
     if (html === last) {
       options.chars && options.chars(html)
-      if (process.env.NODE_ENV !== 'production' && !stack.length && options.warn) {
+      if (!stack.length && options.warn) {
         options.warn(('Mal-formatted tag at end of template: "' + html + '"'))
       }
       break
@@ -301,15 +378,15 @@ function parseHTML (html, options) {
   }
 
   function parseStartTag () {
-    var start = html.match(startTagOpen)
+    let start = html.match(startTagOpen)
     if (start) {
-      var match = {
+      let match = {
         tagName: start[1],
         attrs: [],
         start: index
       }
       advance(start[0].length)
-      var end, attr
+      let end, attr
       while (!(end = html.match(startTagClose)) && (attr = html.match(attribute))) {
         advance(attr[0].length)
         match.attrs.push(attr)
@@ -324,8 +401,8 @@ function parseHTML (html, options) {
   }
 
   function handleStartTag (match) {
-    var tagName = match.tagName
-    var unarySlash = match.unarySlash
+    let tagName = match.tagName
+    let unarySlash = match.unarySlash
 
     if (expectHTML) {
       if (lastTag === 'p' && isNonPhrasingTag(tagName)) {
@@ -336,12 +413,12 @@ function parseHTML (html, options) {
       }
     }
 
-    var unary = isUnaryTag$$1(tagName) || !!unarySlash
+    let unary = isUnaryTag$$1(tagName) || !!unarySlash
 
-    var l = match.attrs.length
-    var attrs = new Array(l)
-    for (var i = 0; i < l; i++) {
-      var args = match.attrs[i]
+    let l = match.attrs.length
+    let attrs = new Array(l)
+    for (let i = 0; i < l; i++) {
+      let args = match.attrs[i]
       // hackish work around FF bug https://bugzilla.mozilla.org/show_bug.cgi?id=369778
       if (IS_REGEX_CAPTURING_BROKEN && args[0].indexOf('""') === -1) {
         if (args[3] === '') {
@@ -354,8 +431,8 @@ function parseHTML (html, options) {
           delete args[5]
         }
       }
-      var value = args[3] || args[4] || args[5] || ''
-      var shouldDecodeNewlines = tagName === 'a' && args[1] === 'href'
+      let value = args[3] || args[4] || args[5] || ''
+      let shouldDecodeNewlines = tagName === 'a' && args[1] === 'href'
         ? options.shouldDecodeNewlinesForHref
         : options.shouldDecodeNewlines
       attrs[i] = {
@@ -365,7 +442,7 @@ function parseHTML (html, options) {
     }
 
     if (!unary) {
-      stack.push({tag: tagName, lowerCasedTag: tagName.toLowerCase(), attrs: attrs})
+      stack.push({ tag: tagName, lowerCasedTag: tagName.toLowerCase(), attrs: attrs })
       lastTag = tagName
     }
 
@@ -375,7 +452,7 @@ function parseHTML (html, options) {
   }
 
   function parseEndTag (tagName, start, end) {
-    var pos, lowerCasedTagName
+    let pos, lowerCasedTagName
     if (start == null) {
       start = index
     }
@@ -401,11 +478,8 @@ function parseHTML (html, options) {
 
     if (pos >= 0) {
       // Close all the open elements, up the stack
-      for (var i = stack.length - 1; i >= pos; i--) {
-        if (process.env.NODE_ENV !== 'production' &&
-          (i > pos || !tagName) &&
-          options.warn
-        ) {
+      for (let i = stack.length - 1; i >= pos; i--) {
+        if ((i > pos || !tagName) && options.warn) {
           options.warn(
             ('tag <' + (stack[i].tag) + '> has no matching end tag.')
           )
@@ -434,17 +508,17 @@ function parseHTML (html, options) {
 }
 
 function parseComponent (content, options) {
-  if (options === void 0) options = {}
+  mode = options.mode || 'wx'
 
-  var sfc = {
+  let sfc = {
     template: null,
     script: null,
     json: null,
     styles: [],
     customBlocks: []
   }
-  var depth = 0
-  var currentBlock = null
+  let depth = 0
+  let currentBlock = null
 
   function start (tag, attrs, unary, start, end) {
     if (depth === 0) {
@@ -453,8 +527,8 @@ function parseComponent (content, options) {
         content: '',
         start: end,
         attrs: attrs.reduce(function (cumulated, ref) {
-          var name = ref.name
-          var value = ref.value
+          let name = ref.name
+          let value = ref.value
 
           cumulated[name] = value || true
           return cumulated
@@ -462,12 +536,30 @@ function parseComponent (content, options) {
       }
       if (isSpecialTag(tag)) {
         checkAttrs(currentBlock, attrs)
+        // 带mode的fields只有匹配当前编译mode才会编译
         if (tag === 'style') {
-          sfc.styles.push(currentBlock)
-        } else if (tag === 'script' && currentBlock.type === 'application/json') {
-          sfc.json = currentBlock
+          if (currentBlock.mode) {
+            if (currentBlock.mode === mode) {
+              sfc.styles.push(currentBlock)
+            }
+          } else {
+            sfc.styles.push(currentBlock)
+          }
         } else {
-          sfc[tag] = currentBlock
+          if (tag === 'script') {
+            if (currentBlock.type === 'application/json' || currentBlock.name === 'json') {
+              tag = 'json'
+            }
+          }
+          if (currentBlock.mode) {
+            if (currentBlock.mode === mode) {
+              sfc[tag] = currentBlock
+            }
+          } else {
+            if (!(sfc[tag] && sfc[tag].mode)) {
+              sfc[tag] = currentBlock
+            }
+          }
         }
       } else { // custom blocks
         sfc.customBlocks.push(currentBlock)
@@ -479,8 +571,8 @@ function parseComponent (content, options) {
   }
 
   function checkAttrs (block, attrs) {
-    for (var i = 0; i < attrs.length; i++) {
-      var attr = attrs[i]
+    for (let i = 0; i < attrs.length; i++) {
+      let attr = attrs[i]
       if (attr.name === 'lang') {
         block.lang = attr.value
       }
@@ -496,17 +588,28 @@ function parseComponent (content, options) {
       if (attr.name === 'src') {
         block.src = attr.value
       }
+      if (attr.name === 'mode') {
+        block.mode = attr.value
+      }
+      if (attr.name === 'name') {
+        block.name = attr.value
+      }
     }
   }
 
   function end (tag, start, end) {
     if (depth === 1 && currentBlock) {
       currentBlock.end = start
-      var text = deindent(content.slice(currentBlock.start, currentBlock.end))
+      let text = deindent(content.slice(currentBlock.start, currentBlock.end))
       // pad content so that linters and pre-processors can output correct
       // line numbers in errors and warnings
       if (currentBlock.type !== 'template' && options.pad) {
         text = padContent(currentBlock, options.pad) + text
+      }
+
+      // 对于<script name="json">的标签，传参调用函数，其返回结果作为json的内容
+      if (currentBlock.type === 'script' && currentBlock.name === 'json') {
+        text = mpxJSON.compileMPXJSONText({ source: text, mode, filePath: options.filePath })
       }
       currentBlock.content = text
       currentBlock = null
@@ -518,8 +621,8 @@ function parseComponent (content, options) {
     if (pad === 'space') {
       return content.slice(0, block.start).replace(replaceRE, ' ')
     } else {
-      var offset = content.slice(0, block.start).split(splitRE).length
-      var padChar = block.type === 'script' && !block.lang
+      let offset = content.slice(0, block.start).split(splitRE).length
+      let padChar = block.type === 'script' && !block.lang
         ? '//\n'
         : '\n'
       return Array(offset).join(padChar)
@@ -535,9 +638,42 @@ function parseComponent (content, options) {
 }
 
 function parse (template, options) {
+  rulesResultMap.clear()
   warn$1 = options.warn || baseWarn
+  error$1 = options.error || baseError
+
+  const _warn = content => {
+    const currentElementRuleResult = rulesResultMap.get(currentEl) || rulesResultMap.set(currentEl, {
+      warnArray: [],
+      errorArray: []
+    }).get(currentEl)
+    currentElementRuleResult.warnArray.push(content)
+  }
+  const _error = content => {
+    const currentElementRuleResult = rulesResultMap.get(currentEl) || rulesResultMap.set(currentEl, {
+      warnArray: [],
+      errorArray: []
+    }).get(currentEl)
+    currentElementRuleResult.errorArray.push(content)
+  }
 
   mode = options.mode || 'wx'
+  srcMode = options.srcMode || mode
+  isNative = options.isNative
+  basename = options.basename
+
+  rulesRunner = getRulesRunner({
+    mode,
+    srcMode,
+    type: 'template',
+    testKey: 'tag',
+    warn: _warn,
+    error: _error
+  })
+
+  injectNodes = []
+  forScopes = []
+  forScopesMap = {}
 
   platformGetTagNamespace = options.getTagNamespace || no
 
@@ -546,6 +682,13 @@ function parse (template, options) {
   let root
   let meta = {}
   let currentParent
+  let multiRootError
+
+  function genTempRoot () {
+    // 使用临时节点作为root，处理multi root的情况
+    root = currentParent = getTempNode()
+    stack.push(root)
+  }
 
   parseHTML(template, {
     warn: warn$1,
@@ -573,62 +716,61 @@ function parse (template, options) {
 
       if (isForbiddenTag(element)) {
         element.forbidden = true
-        process.env.NODE_ENV !== 'production' && warn$1(
+        warn$1(
           'Templates should only be responsible for mapping the state to the ' +
           'UI. Avoid placing tags with side-effects in your templates, such as ' +
           '<' + tag + '>' + ', as they will not be parsed.'
         )
       }
 
-      processElement(element, options, meta)
+      // single root
+      // // gen root
+      // if (!root) {
+      //   root = element
+      // } else {
+      //   // mount element
+      //   if (currentParent) {
+      //     currentParent.children.push(element)
+      //     element.parent = currentParent
+      //   } else {
+      //     multiRootError = true
+      //     return
+      //   }
+      // }
 
-      // tree management
-      if (!root) {
-        root = element
-      } else {
-        if (currentParent) {
-          if (!element.forbidden) {
-            currentParent.children.push(element)
-            element.parent = currentParent
-          }
-        } else {
-          // fix mutiple root case
-          let temp = root
-          root = currentParent = getTempNode()
-          currentParent.children.push(temp, element)
-          temp.parent = currentParent
-          element.parent = currentParent
-          stack.unshift(root)
-        }
-      }
+      // multi root
+      if (!currentParent) genTempRoot()
 
+      currentParent.children.push(element)
+      element.parent = currentParent
+
+      processElement(element, root, options, meta)
       if (!unary) {
         currentParent = element
         stack.push(element)
       } else {
         element.unary = true
-        root = closeElement(element, root)
+        closeElement(element, meta)
       }
     },
 
     end: function end () {
       // remove trailing whitespace
       let element = stack[stack.length - 1]
-      let lastNode = element.children[element.children.length - 1]
-      if (lastNode && lastNode.type === 3 && lastNode.text === ' ') {
-        element.children.pop()
+      if (element) {
+        let lastNode = element.children[element.children.length - 1]
+        if (lastNode && lastNode.type === 3 && lastNode.text === ' ') {
+          element.children.pop()
+        }
+        // pop stack
+        stack.pop()
+        currentParent = stack[stack.length - 1]
+        closeElement(element, meta)
       }
-      // pop stack
-      stack.pop()
-      currentParent = stack[stack.length - 1]
-      root = closeElement(element, root)
     },
 
     chars: function chars (text) {
-      if (!currentParent) {
-        root = currentParent = getTempNode()
-        stack.unshift(root)
-      }
+      if (!currentParent) genTempRoot()
       // IE textarea placeholder bug
       /* istanbul ignore if */
       if (isIE &&
@@ -654,10 +796,7 @@ function parse (template, options) {
       }
     },
     comment: function comment (text) {
-      if (!currentParent) {
-        root = currentParent = getTempNode()
-        stack.unshift(root)
-      }
+      if (!currentParent) genTempRoot()
       currentParent.children.push({
         type: 3,
         text: text,
@@ -665,6 +804,20 @@ function parse (template, options) {
       })
     }
   })
+
+  if (multiRootError) {
+    error$1('Template fields should has one single root, considering wrapping your template content with <view> or <text> tag!')
+  }
+
+  if (injectNodes.length) {
+    root.children = injectNodes.concat(root.children)
+  }
+
+  rulesResultMap.forEach((val) => {
+    Array.isArray(val.warnArray) && val.warnArray.forEach(item => warn$1(item))
+    Array.isArray(val.errorArray) && val.errorArray.forEach(item => error$1(item))
+  })
+
   return {
     root,
     meta
@@ -675,18 +828,17 @@ function getTempNode () {
   return createASTElement('temp-node', [])
 }
 
-function getAndRemoveAttr (el, name, removeFromMap) {
+function getAndRemoveAttr (el, name, removeFromMap = true) {
   let val
-  if ((val = el.attrsMap[name]) != null) {
-    let list = el.attrsList
-    for (let i = 0, l = list.length; i < l; i++) {
-      if (list[i].name === name) {
-        list.splice(i, 1)
-        break
-      }
+  let list = el.attrsList
+  for (let i = 0, l = list.length; i < l; i++) {
+    if (list[i].name === name) {
+      val = list[i].value
+      list.splice(i, 1)
+      break
     }
   }
-  if (removeFromMap) {
+  if (removeFromMap && val === el.attrsMap[name]) {
     delete el.attrsMap[name]
   }
   return val
@@ -694,7 +846,7 @@ function getAndRemoveAttr (el, name, removeFromMap) {
 
 function addAttrs (el, attrs) {
   el.attrsList = el.attrsList.concat(attrs)
-  Object.assign(el.attrsMap, makeAttrsMap(attrs))
+  el.attrsMap = makeAttrsMap(el.attrsList)
 }
 
 function modifyAttr (el, name, val) {
@@ -709,11 +861,47 @@ function modifyAttr (el, name, val) {
 }
 
 function stringify (str) {
-  return config[mode].stringify(str)
+  return JSON.stringify(str)
 }
 
-let tagRE = /\{\{((?:.|\n)+?)\}\}/
-let tagREG = /\{\{((?:.|\n)+?)\}\}/g
+let tagRE = /\{\{((?:.|\n)+?)\}\}(?!})/
+let tagREG = /\{\{((?:.|\n)+?)\}\}(?!})/g
+
+// function processLifecycleHack (el, options) {
+//   if (options.usingComponents.indexOf(el.tag) !== -1 || el.tag === 'component') {
+//     if (el.if) {
+//       el.if = {
+//         raw: `{{${el.if.exp} && mpxLifecycleHack}}`,
+//         exp: `${el.if.exp} && mpxLifecycleHack`
+//       }
+//     } else if (el.elseif) {
+//       el.elseif = {
+//         raw: `{{${el.elseif.exp} && mpxLifecycleHack}}`,
+//         exp: `${el.elseif.exp} && mpxLifecycleHack`
+//       }
+//     } else if (el.else) {
+//       el.elseif = {
+//         raw: '{{mpxLifecycleHack}}',
+//         exp: 'mpxLifecycleHack'
+//       }
+//       delete el.else
+//     } else {
+//       el.if = {
+//         raw: '{{mpxLifecycleHack}}',
+//         exp: 'mpxLifecycleHack'
+//       }
+//     }
+//   }
+// }
+
+function processPageStatus (el, options) {
+  if (options.usingComponents.indexOf(el.tag) !== -1 || el.tag === 'component') {
+    addAttrs(el, [{
+      name: 'mpxPageStatus',
+      value: '{{mpxPageStatus}}'
+    }])
+  }
+}
 
 function processComponentIs (el, options) {
   if (el.tag !== 'component') {
@@ -722,149 +910,268 @@ function processComponentIs (el, options) {
 
   options = options || {}
   el.components = options.usingComponents
-  if (process.env.NODE_ENV !== 'production' && !el.components) {
+  if (!el.components) {
     warn$1('Component in which <component> tag is used must have a nonblank usingComponents field')
   }
 
   let is = getAndRemoveAttr(el, 'is')
-  if (process.env.NODE_ENV !== 'production' && !is) {
+  if (!is) {
     warn$1('<component> tag should have attrs[is].')
   }
   if (is) {
     let match = tagRE.exec(is)
     if (match) {
-      if (process.env.NODE_ENV !== 'production' && match[0] !== is) {
+      if (match[0] !== is) {
         warn$1('only first mustache expression is valid in <component> attrs[is].')
       }
-      el.is = match[1]
+      el.is = match[1].trim()
     } else {
       el.is = stringify(is)
     }
   }
 }
 
-function processPageStatus (el, options) {
-  if (options.usingComponents.indexOf(el.tag) !== -1 || el.tag === 'component') {
-    addAttrs(el, [{
-      name: '__pageStatus',
-      value: '{{__pageStatus}}'
-    }])
-  }
-}
+// function processComponentDepth (el, options) {
+//   if (options.usingComponents.indexOf(el.tag) !== -1 || el.tag === 'component') {
+//     addAttrs(el, [{
+//       name: 'mpxDepth',
+//       value: '{{mpxDepth + 1}}'
+//     }])
+//   }
+// }
 
 function parseFuncStr2 (str) {
-  let funcRE = /^([^()]+)(?:\((.*)\))?/
+  let funcRE = /^([^()]+)(\((.*)\))?/
   let match = funcRE.exec(str)
   if (match) {
     let funcName = stringify(match[1])
-    let args = match[2] ? `,${match[2]}` : ''
-    args = args.replace('$event', stringify('$event'))
-    return `[${funcName + args}]`
+    let args = match[3] ? `,${match[3]}` : ''
+    let hasArgs = !!match[2]
+    args = args.replace(/(\$event([^,\s])*)/, (match, p1) => stringify(p1))
+    return {
+      hasArgs,
+      expStr: `[${funcName + args}]`
+    }
   }
 }
 
-function processBindEvent (el, options) {
-  let bindRE = config[mode].event.bindReg
-  let result = {}
-  let hasBind = false
-  let isComponent = options.usingComponents.indexOf(el.tag) !== -1 || el.tag === 'component'
-  if (mode === 'ali' && isComponent) {
-    return
+function stringifyWithResolveComputed (modelValue) {
+  let result = []
+  let inString = false
+  let computedStack = []
+  let fragment = ''
+
+  for (let i = 0; i < modelValue.length; i++) {
+    const char = modelValue[i]
+    if (inString) {
+      if (char === inString) {
+        inString = false
+      }
+    } else if (char === '"' || char === '\'') {
+      inString = char
+    } else if (char === '[') {
+      computedStack.push(char)
+      if (computedStack.length === 1) {
+        fragment += '.'
+        result.push(JSON.stringify(fragment))
+        fragment = ''
+        continue
+      }
+    } else if (computedStack.length) {
+      if (char === ']') {
+        computedStack.pop()
+        if (computedStack.length === 0) {
+          result.push(fragment)
+          fragment = '.'
+          continue
+        }
+      }
+    }
+    fragment += char
   }
+  if (fragment !== '.') {
+    result.push(JSON.stringify(fragment))
+  }
+  return result.join('+')
+}
+
+function processBindEvent (el) {
+  const eventConfigMap = {}
   el.attrsList.forEach(function (attr) {
-    let match = bindRE.exec(attr.name)
-    if (match) {
-      let type = config[mode].event.getType(match)
+    let parsedEvent = config[mode].event.parseEvent(attr.name)
+
+    if (parsedEvent) {
+      let type = parsedEvent.eventName
+      let modifiers = (parsedEvent.modifier || '').split('.')
       let parsedFunc = parseFuncStr2(attr.value)
       if (parsedFunc) {
-        hasBind = true
-        if (!result[type]) {
-          result[type] = []
+        if (!eventConfigMap[type]) {
+          eventConfigMap[type] = {
+            rawName: attr.name,
+            configs: []
+          }
         }
-        result[type].push(parsedFunc)
-        modifyAttr(el, attr.name, '__invoke')
+        eventConfigMap[type].configs.push(parsedFunc)
+        if (modifiers.indexOf('proxy') > -1) {
+          eventConfigMap[type].proxy = true
+        }
       }
     }
   })
 
   let modelExp = getAndRemoveAttr(el, config[mode].directive.model)
-  let modelValue
   if (modelExp) {
     let match = tagRE.exec(modelExp)
     if (match) {
       let modelProp = getAndRemoveAttr(el, config[mode].directive.modelProp) || config[mode].event.defaultModelProp
       let modelEvent = getAndRemoveAttr(el, config[mode].directive.modelEvent) || config[mode].event.defaultModelEvent
-      modelValue = match[1]
-      if (!result[modelEvent]) {
-        result[modelEvent] = []
+      const modelValuePath = getAndRemoveAttr(el, config[mode].directive.modelValuePath) || config[mode].event.defaultModelValuePath
+      const modelFilter = getAndRemoveAttr(el, config[mode].directive.modelFilter) || config[mode].event.modelFilter
+      let modelValuePathArr
+      try {
+        modelValuePathArr = JSON.parse(modelValuePath)
+      } catch (e) {
+        modelValuePathArr = modelValuePath.split('.')
       }
-      result[modelEvent].push(`[${stringify('__model')},${stringify(modelValue)},${stringify('$event')}]`)
+      if (!isValidIdentifierStr(modelEvent)) {
+        warn$1(`EventName ${modelEvent} which is used in ${config[mode].directive.model} must be a valid identifier!`)
+        return
+      }
+      let modelValue = match[1].trim()
+      let stringifiedModelValue = stringifyWithResolveComputed(modelValue)
+      // if (forScopes.length) {
+      //   stringifiedModelValue = stringifyWithResolveComputed(modelValue)
+      // } else {
+      //   stringifiedModelValue = stringify(modelValue)
+      // }
+
+      if (!eventConfigMap[modelEvent]) {
+        eventConfigMap[modelEvent] = {
+          configs: []
+        }
+      }
+      eventConfigMap[modelEvent].configs.unshift({
+        hasArgs: true,
+        expStr: `[${stringify('__model')},${stringifiedModelValue},${stringify('$event')},${stringify(modelValuePathArr)},${stringify(modelFilter)}]`
+      })
       addAttrs(el, [
         {
           name: modelProp,
           value: modelExp
-        },
-        {
-          name: config[mode].event.getBind(modelEvent),
-          value: '__invoke'
         }
       ])
     }
   }
 
-  if (hasBind || modelValue) {
+  for (let type in eventConfigMap) {
+    let needBind = false
+    let { configs, rawName, proxy } = eventConfigMap[type]
+    if (proxy) {
+      needBind = true
+    } else if (configs.length > 1) {
+      needBind = true
+    } else if (configs.length === 1) {
+      needBind = !!configs[0].hasArgs
+    }
+    // 排除特殊情况
+    if (needBind && !isValidIdentifierStr(type)) {
+      warn$1(`EventName ${type} which need be framework proxy processed must be a valid identifier!`)
+      needBind = false
+    }
+    if (needBind) {
+      if (rawName) {
+        // 清空原始事件绑定
+        let val
+        do {
+          val = getAndRemoveAttr(el, rawName)
+        } while (val)
+        // 清除修饰符
+        rawName = rawName.replace(/\..*/, '')
+      }
+
+      addAttrs(el, [
+        {
+          name: rawName || config[mode].event.getEvent(type),
+          value: '__invoke'
+        }
+      ])
+      eventConfigMap[type] = configs.map((item) => {
+        return item.expStr
+      })
+    } else {
+      delete eventConfigMap[type]
+    }
+  }
+
+  if (!isEmptyObject(eventConfigMap)) {
     addAttrs(el, [{
-      name: 'data-__bindconfigs',
-      value: `{{${config[mode].event.shallowStringify(result)}}}`
+      name: 'data-eventconfigs',
+      value: `{{${config[mode].event.shallowStringify(eventConfigMap)}}}`
     }])
   }
 }
 
-function parseMustache (raw) {
-  raw = (raw || '').trim()
+function parseMustache (raw = '') {
+  let replaced = false
   if (tagRE.test(raw)) {
     let ret = []
     let lastLastIndex = 0
     let match
     while (match = tagREG.exec(raw)) {
       let pre = raw.substring(lastLastIndex, match.index)
-      if (pre) ret.push(stringify(pre))
-      ret.push(match[1])
+      if (pre) {
+        ret.push(stringify(pre))
+      }
+      let exp = match[1]
+      if (/\b__mpx_mode__\b/.test(exp)) {
+        exp = exp.replace(/\b__mpx_mode__\b/g, stringify(mode))
+        replaced = true
+      }
+      ret.push(`(${exp})`)
       lastLastIndex = tagREG.lastIndex
     }
     let post = raw.substring(lastLastIndex)
-    if (post) ret.push(stringify(post))
+    if (post) {
+      ret.push(stringify(post))
+    }
+    let result = ret.join('+')
     return {
-      result: ret.join('+'),
-      hasBinding: true
+      result,
+      hasBinding: true,
+      val: replaced ? `{{${result}}}` : raw,
+      replaced
     }
   }
   return {
     result: stringify(raw),
-    hasBinding: false
+    hasBinding: false,
+    val: raw,
+    replaced
   }
 }
 
-function addExp (el, exp) {
+function addExp (el, exp, needTravel) {
   if (exp) {
     if (!el.exps) {
       el.exps = []
     }
-    el.exps.push(exp)
+    el.exps.push({ exp, needTravel })
   }
 }
 
 function processIf (el) {
   let val = getAndRemoveAttr(el, config[mode].directive.if)
   if (val) {
+    let parsed = parseMustache(val)
     el.if = {
-      raw: val,
-      exp: parseMustache(val).result
+      raw: parsed.val,
+      exp: parsed.result
     }
   } else if (val = getAndRemoveAttr(el, config[mode].directive.elseif)) {
+    let parsed = parseMustache(val)
     el.elseif = {
-      raw: val,
-      exp: parseMustache(val).result
+      raw: parsed.val,
+      exp: parsed.result
     }
   } else if (getAndRemoveAttr(el, config[mode].directive.else) != null) {
     el.else = true
@@ -874,9 +1181,10 @@ function processIf (el) {
 function processFor (el) {
   let val = getAndRemoveAttr(el, config[mode].directive.for)
   if (val) {
+    let parsed = parseMustache(val)
     el.for = {
-      raw: val,
-      exp: parseMustache(val).result
+      raw: parsed.val,
+      exp: parsed.result
     }
     if (val = getAndRemoveAttr(el, config[mode].directive.forIndex)) {
       el.for.index = val
@@ -887,20 +1195,106 @@ function processFor (el) {
     if (val = getAndRemoveAttr(el, config[mode].directive.key)) {
       el.for.key = val
     }
+    pushForScopes({
+      index: el.for.index || 'index',
+      item: el.for.item || 'item'
+    })
   }
 }
 
-function processAttrs (el) {
+function processRef (el, options, meta) {
+  let val = getAndRemoveAttr(el, config[mode].directive.ref)
+  let type = options.usingComponents.indexOf(el.tag) !== -1 || el.tag === 'component' ? 'component' : 'node'
+  if (val) {
+    if (!meta.refs) {
+      meta.refs = []
+    }
+    let all = !!forScopes.length
+    let refClassName = `__ref_${val}_${++refId}_{{mpxCid}}`
+    let className = getAndRemoveAttr(el, 'class')
+    className = className ? className + ' ' + refClassName : refClassName
+    addAttrs(el, [{
+      name: 'class',
+      value: className
+    }])
+    meta.refs.push({
+      key: val,
+      selector: `.${refClassName}`,
+      type,
+      all
+    })
+  }
+
+  if (type === 'component' && mode === 'ali') {
+    addAttrs(el, [{
+      name: 'onUpdateRef',
+      value: '__handleUpdateRef'
+    }])
+  }
+}
+
+function addWxsModule (meta, module, src) {
+  if (!meta.wxsModuleMap) {
+    meta.wxsModuleMap = {}
+  }
+  if (meta.wxsModuleMap[module]) return true
+  meta.wxsModuleMap[module] = src
+}
+
+function addWxsContent (meta, module, content) {
+  if (!meta.wxsConentMap) {
+    meta.wxsConentMap = {}
+  }
+  if (meta.wxsConentMap[module]) return true
+  meta.wxsConentMap[module] = content
+}
+
+function postProcessWxs (el, meta) {
+  if (el.tag === config[mode].wxs.tag) {
+    let module = el.attrsMap[config[mode].wxs.module]
+    if (module) {
+      let src, content
+      if (el.attrsMap[config[mode].wxs.src]) {
+        src = el.attrsMap[config[mode].wxs.src]
+      } else {
+        content = el.children.filter((child) => {
+          return child.type === 3 && !child.isComment
+        }).map(child => child.text).join('\n')
+        src = addQuery('./' + basename, {
+          wxsModule: module
+        })
+        addAttrs(el, [{
+          name: config[mode].wxs.src,
+          value: src
+        }])
+        el.children = []
+      }
+      src && addWxsModule(meta, module, src)
+      content && addWxsContent(meta, module, content)
+    }
+  }
+}
+
+function processAttrs (el, options) {
   el.attrsList.forEach((attr) => {
-    let parsed = parseMustache(attr.value)
+    const isTemplateData = el.tag === 'template' && attr.name === 'data'
+    const needWrap = isTemplateData && mode !== 'swan'
+    let value = needWrap ? `{${attr.value}}` : attr.value
+    let parsed = parseMustache(value)
     if (parsed.hasBinding) {
-      addExp(el, parsed.result)
+      let needTravel = (options.usingComponents.indexOf(el.tag) !== -1 || el.tag === 'component') && !(attr.name === 'class' || attr.name === 'style')
+      addExp(el, parsed.result, needTravel)
+    }
+    if (parsed.replaced) {
+      modifyAttr(el, attr.name, needWrap ? attr.value.replace(/\b__mpx_mode__\b/g, stringify(mode)) : parsed.val)
     }
   })
 }
 
 function postProcessFor (el) {
   if (el.for) {
+    let targetEl = el
+
     let attrs = [
       {
         name: config[mode].directive.for,
@@ -925,27 +1319,96 @@ function postProcessFor (el) {
         value: el.for.key
       })
     }
-    addAttrs(el, attrs)
+
+    /*
+      对百度小程序同时带有if和for的指令外套一层block，并将for放到外层
+      这个操作主要是因为百度小程序不支持这两个directive在同级使用
+     */
+    if (el.if && mode === 'swan') {
+      targetEl = createASTElement('block', [])
+      targetEl.for = el.for
+      targetEl.children = [el]
+      replaceNode(el, targetEl)
+
+      el.parent = targetEl
+      delete el.for
+    }
+
+    addAttrs(targetEl, attrs)
+    popForScopes()
   }
 }
 
+function evalExp (exp) {
+  // eslint-disable-next-line no-new-func
+  const fn = new Function(`return ${exp};`)
+  let result = { success: false }
+  try {
+    result = {
+      success: true,
+      result: fn()
+    }
+  } catch (e) {
+  }
+  return result
+}
+
 function postProcessIf (el) {
-  let attrs
+  let attrs, result, prevNode
   if (el.if) {
-    attrs = [{
-      name: config[mode].directive.if,
-      value: el.if.raw
-    }]
+    result = evalExp(el.if.exp)
+    if (result.success) {
+      if (result.result) {
+        delete el.if
+        el._if = true
+      } else {
+        replaceNode(el, getTempNode())._if = false
+      }
+    } else {
+      attrs = [{
+        name: config[mode].directive.if,
+        value: el.if.raw
+      }]
+    }
   } else if (el.elseif) {
-    attrs = [{
-      name: config[mode].directive.elseif,
-      value: el.elseif.raw
-    }]
+    prevNode = findPrevNode(el)
+    if (prevNode._if === true) {
+      removeNode(el)
+    } else if (prevNode._if === false) {
+      // 当做if处理
+      el.if = el.elseif
+      delete el.elseif
+      postProcessIf(el)
+    } else {
+      result = evalExp(el.elseif.exp)
+      if (result.success) {
+        if (result.result) {
+          // 当做else处理
+          delete el.elseif
+          el._if = el.else = true
+          postProcessIf(el)
+        } else {
+          removeNode(el)
+        }
+      } else {
+        attrs = [{
+          name: config[mode].directive.elseif,
+          value: el.elseif.raw
+        }]
+      }
+    }
   } else if (el.else) {
-    attrs = [{
-      name: config[mode].directive.else,
-      value: ''
-    }]
+    prevNode = findPrevNode(el)
+    if (prevNode._if === true) {
+      removeNode(el)
+    } else if (prevNode._if === false) {
+      delete el.else
+    } else {
+      attrs = [{
+        name: config[mode].directive.else,
+        value: ''
+      }]
+    }
   }
   if (attrs) {
     addAttrs(el, attrs)
@@ -960,66 +1423,234 @@ function processText (el) {
   if (parsed.hasBinding) {
     addExp(el, parsed.result)
   }
+  el.text = parsed.val
 }
 
-function injectComputed (el, meta, type, body) {
-  if (!meta.computed) {
-    meta.computed = []
-    meta.computedId = 0
+// function injectComputed (el, meta, type, body) {
+//   if (!meta.computed) {
+//     meta.computed = []
+//     meta.computedId = 0
+//   }
+//   let injectName = `__injected_${type}_${++meta.computedId}`
+//   meta.computed.push(`${injectName}: function(){\n${body}}`)
+//   addAttrs(el, [{
+//     name: type,
+//     value: `{{${injectName}}}`
+//   }])
+// }
+
+function injectWxs (meta, module, src) {
+  if (addWxsModule(meta, module, src)) {
+    return
   }
-  let injectName = `__injected_${type}_${++meta.computedId}`
-  meta.computed.push(`${injectName}: function(){\n${body}}`)
-  addAttrs(el, [{
-    name: type,
-    value: `{{${injectName}}}`
-  }])
+  let wxsNode = createASTElement(config[mode].wxs.tag, [
+    {
+      name: config[mode].wxs.module,
+      value: module
+    },
+    {
+      name: config[mode].wxs.src,
+      value: src
+    }
+  ])
+  injectNodes.push(wxsNode)
 }
+
+const injectHelperWxsPath = normalize.lib('runtime/injectHelper.wxs')
 
 function processClass (el, meta) {
-  let type = 'class'
+  const type = 'class'
+  const targetType = el.tag.startsWith('th-') ? 'ex-' + type : type
   let dynamicClass = getAndRemoveAttr(el, config[mode].directive.dynamicClass)
+  let staticClass = getAndRemoveAttr(el, type)
   if (dynamicClass) {
-    let staticClassExp = parseMustache(getAndRemoveAttr(el, type)).result
+    let staticClassExp = parseMustache(staticClass).result
     let dynamicClassExp = parseMustache(dynamicClass).result
-    let body = `return this.__transformClass(${staticClassExp}, ${dynamicClassExp});\n`
-    injectComputed(el, meta, type, body)
+    addAttrs(el, [{
+      name: targetType,
+      value: `{{__injectHelper.transformClass(${staticClassExp}, ${dynamicClassExp})}}`
+    }])
+    injectWxs(meta, '__injectHelper', injectHelperWxsPath)
+  } else if (staticClass) {
+    addAttrs(el, [{
+      name: targetType,
+      value: staticClass
+    }])
   }
 }
 
 function processStyle (el, meta) {
-  let type = 'style'
+  const type = 'style'
+  const targetType = el.tag.startsWith('th-') ? 'ex-' + type : type
   let dynamicStyle = getAndRemoveAttr(el, config[mode].directive.dynamicStyle)
+  let staticStyle = getAndRemoveAttr(el, type)
   if (dynamicStyle) {
-    let staticStyleExp = parseMustache(getAndRemoveAttr(el, type)).result
+    let staticStyleExp = parseMustache(staticStyle).result
     let dynamicStyleExp = parseMustache(dynamicStyle).result
-    let body = `return this.__transformStyle(${staticStyleExp}, ${dynamicStyleExp});\n`
-    injectComputed(el, meta, type, body)
+    addAttrs(el, [{
+      name: targetType,
+      value: `{{__injectHelper.transformStyle(${staticStyleExp}, ${dynamicStyleExp})}}`
+    }])
+    injectWxs(meta, '__injectHelper', injectHelperWxsPath)
+  } else if (staticStyle) {
+    addAttrs(el, [{
+      name: targetType,
+      value: staticStyle
+    }])
   }
 }
 
-function processElement (el, options, meta) {
+function isRealNode (el) {
+  const virtualNodeTagMap = ['block', 'template', 'import', config[mode].wxs.tag].reduce((map, item) => {
+    map[item] = true
+    return map
+  }, {})
+  return !virtualNodeTagMap[el.tag]
+}
+
+function processAliExternalClassesHack (el, options) {
+  let staticClass = getAndRemoveAttr(el, 'class')
+  if (staticClass) {
+    options.externalClasses.forEach(({ className, replacement }) => {
+      const reg = new RegExp('\\b' + className + '\\b', 'g')
+      staticClass = staticClass.replace(reg, `{{${replacement}||''}}`)
+    })
+    addAttrs(el, [{
+      name: 'class',
+      value: staticClass
+    }])
+  }
+}
+
+function processAliStyleClassHack (el, options, root) {
+  ['style', 'class'].forEach((type) => {
+    let exp = getAndRemoveAttr(el, type)
+    let sep = type === 'style' ? ';' : ' '
+
+    let typeName = 'mpx' + type.replace(/^./, (matched) => {
+      return matched.toUpperCase()
+    })
+
+    if (options.isComponent && el.parent === root && isRealNode(el)) {
+      if (exp !== undefined) {
+        exp = `{{${typeName}||''}}` + sep + exp
+      } else {
+        exp = `{{${typeName}||''}}`
+      }
+    }
+    if (exp !== undefined) {
+      if (options.usingComponents.indexOf(el.tag) !== -1 || el.tag === 'component') {
+        addAttrs(el, [{
+          name: typeName,
+          value: exp
+        }])
+      } else {
+        addAttrs(el, [{
+          name: type,
+          value: exp
+        }])
+      }
+    }
+  })
+}
+
+function processShow (el, options, root) {
+  let show = getAndRemoveAttr(el, config[mode].directive.show)
+  if (options.isComponent && el.parent === root && isRealNode(el)) {
+    if (show !== undefined) {
+      show = `{{${parseMustache(show).result}&&mpxShow}}`
+    } else {
+      show = '{{mpxShow}}'
+    }
+  }
+  if (show !== undefined) {
+    if (options.usingComponents.indexOf(el.tag) !== -1 || el.tag === 'component') {
+      if (show === '') {
+        show = '{{false}}'
+      }
+      addAttrs(el, [{
+        name: 'mpxShow',
+        value: show
+      }])
+    } else {
+      const showExp = parseMustache(show).result
+      let oldStyle = getAndRemoveAttr(el, 'style')
+      oldStyle = oldStyle ? oldStyle + ';' : ''
+      addAttrs(el, [{
+        name: 'style',
+        value: `${oldStyle}{{${showExp}||${showExp}===undefined?'':'display:none;'}}`
+      }])
+    }
+  }
+}
+
+function processTemplate (el) {
+  if (el.tag === 'template' && el.attrsMap['name']) {
+    el.isTemplate = true
+    processingTemplate = true
+    return true
+  }
+}
+
+function postProcessTemplate (el) {
+  if (el.isTemplate) {
+    processingTemplate = false
+    return true
+  }
+}
+
+function processElement (el, root, options, meta) {
+  if (rulesRunner) {
+    currentEl = el
+    rulesRunner(el)
+  }
+
+  let tranAli = mode === 'ali' && srcMode === 'wx'
+
+  const pass = isNative || processTemplate(el) || processingTemplate
+
+  if (tranAli) {
+    processAliExternalClassesHack(el, options)
+  }
+
   processIf(el)
   processFor(el)
-  if (mode === 'wx') {
-    processPageStatus(el, options)
-    processBindEvent(el, options)
+  processRef(el, options, meta)
+
+  if (!pass) {
+    if (mode !== 'tt') {
+      processClass(el, meta)
+      processStyle(el, meta)
+    }
+    processShow(el, options, root)
   }
-  processComponentIs(el, options)
-  processClass(el, meta)
-  processStyle(el, meta)
-  processAttrs(el)
+
+  if (mode === 'ali') {
+    processAliStyleClassHack(el, options, root)
+  }
+
+  if (!pass) {
+    processBindEvent(el)
+    if (mode !== 'ali') {
+      processPageStatus(el, options)
+    }
+    processComponentIs(el, options)
+  }
+
+  processAttrs(el, options)
 }
 
-function closeElement (el, root) {
-  let ret = postProcessComponentIs(el, root)
-  el = ret.el
-  root = ret.root
+function closeElement (el, meta) {
+  const pass = isNative || postProcessTemplate(el) || processingTemplate
+  postProcessWxs(el, meta)
+  if (!pass) {
+    el = postProcessComponentIs(el)
+  }
   postProcessFor(el)
   postProcessIf(el)
-  return root
 }
 
-function postProcessComponentIs (el, root) {
+function postProcessComponentIs (el) {
   if (el.is && el.components) {
     let tempNode
     if (el.for || el.if || el.elseif || el.else) {
@@ -1039,53 +1670,73 @@ function postProcessComponentIs (el, root) {
       }
       newChild.children = el.children
       newChild.exps = el.exps
+      newChild.parent = tempNode
       postProcessIf(newChild)
       return newChild
     })
-    if (el === root) {
-      root = tempNode
+    if (!el.parent) {
+      error$1('Dynamic component can not be the template root, considering wrapping it with <view> or <text> tag!')
     } else {
-      tempNode.parent = el.parent
-      el.parent.children.pop()
-      el.parent.children.push(tempNode)
+      el = replaceNode(el, tempNode) || el
     }
-    el = tempNode
   }
-  return {el, root}
+  return el
+}
+
+function stringifyAttr (val) {
+  if (val) {
+    const hasSingle = val.indexOf('\'') > -1
+    const hasDouble = val.indexOf('"') > -1
+    // 移除属性中换行
+    val = val.replace(/\n/g, '')
+
+    if (hasSingle && hasDouble) {
+      val = val.replace(/'/g, '"')
+    }
+    if (hasDouble) {
+      return `'${val}'`
+    } else {
+      return `"${val}"`
+    }
+  }
+  return val
 }
 
 function serialize (root) {
   function walk (node) {
     let result = ''
-    if (node.type === 3) {
-      if (node.isComment) {
-        result += '<!--' + node.text + '-->'
-      } else {
-        result += node.text
-      }
-    }
-    if (node.type === 1) {
-      if (node.tag !== 'temp-node') {
-        result += '<' + node.tag
-        node.attrsList.forEach(function (attr) {
-          result += ' ' + attr.name
-          if (attr.value != null && attr.value !== '') {
-            result += '=' + stringify(attr.value)
-          }
-        })
-        if (node.unary) {
-          result += '/>'
+    if (node) {
+      if (node.type === 3) {
+        if (node.isComment) {
+          result += '<!--' + node.text + '-->'
         } else {
-          result += '>'
+          result += node.text
+        }
+      }
+      if (node.type === 1) {
+        if (node.tag !== 'temp-node') {
+          result += '<' + node.tag
+          node.attrsList.forEach(function (attr) {
+            result += ' ' + attr.name
+            let value = attr.value
+            if (value != null && value !== '') {
+              result += '=' + stringifyAttr(value)
+            }
+          })
+          if (node.unary) {
+            result += '/>'
+          } else {
+            result += '>'
+            node.children.forEach(function (child) {
+              result += walk(child)
+            })
+            result += '</' + node.tag + '>'
+          }
+        } else {
           node.children.forEach(function (child) {
             result += walk(child)
           })
-          result += '</' + node.tag + '>'
         }
-      } else {
-        node.children.forEach(function (child) {
-          result += walk(child)
-        })
       }
     }
     return result
@@ -1103,6 +1754,31 @@ function findPrevNode (node) {
       if (preNode.type === 1) {
         return preNode
       }
+    }
+  }
+}
+
+function replaceNode (node, newNode) {
+  deleteErrorInResultMap(node)
+  let parent = node.parent
+  if (parent) {
+    let index = parent.children.indexOf(node)
+    if (index !== -1) {
+      parent.children.splice(index, 1, newNode)
+      newNode.parent = parent
+      return newNode
+    }
+  }
+}
+
+function removeNode (node) {
+  deleteErrorInResultMap(node)
+  let parent = node.parent
+  if (parent) {
+    let index = parent.children.indexOf(node)
+    if (index !== -1) {
+      parent.children.splice(index, 1)
+      return true
     }
   }
 }
@@ -1133,8 +1809,8 @@ function genElse (node) {
 }
 
 function genExps (node) {
-  return `${node.exps.map((exp) => {
-    return `this.__travel(${exp}, __seen);\n`
+  return `${node.exps.map(({ exp, needTravel }) => {
+    return needTravel ? `this.__travel(${exp}, __seen);\n` : `${exp};\n`
   }).join('')}`
 }
 
@@ -1142,40 +1818,42 @@ function genFor (node) {
   node.forProcessed = true
   let index = node.for.index || 'index'
   let item = node.for.item || 'item'
-  return `this.__iterate((${node.for.exp}), function(${item},${index}){\n${genNode(node)}}.bind(this));\n`
+  return `this.__iterate(${node.for.exp}, function(${item},${index}){\n${genNode(node)}}.bind(this));\n`
 }
 
 function genNode (node) {
   let exp = ''
-  if (node.type === 3) {
-    if (node.exps && !node.isComment) {
-      exp += genExps(node)
-    }
-  }
-  if (node.type === 1) {
-    if (node.tag !== 'temp-node') {
-      if (node.if && !node.ifProcessed) {
-        exp += genIf(node)
-      } else if (node.elseif && !node.elseifProcessed) {
-        exp += genElseif(node)
-      } else if (node.else && !node.elseProcessed) {
-        exp += genElse(node)
-      } else if (node.for && !node.forProcessed) {
-        exp += genFor(node)
-      } else {
-        if (node.exps) {
-          exp += genExps(node)
-        }
-        if (!node.unary) {
-          node.children.forEach(function (child) {
-            exp += genNode(child)
-          })
-        }
+  if (node) {
+    if (node.type === 3) {
+      if (node.exps && !node.isComment) {
+        exp += genExps(node)
       }
-    } else {
-      node.children.forEach(function (child) {
-        exp += genNode(child)
-      })
+    }
+    if (node.type === 1) {
+      if (node.tag !== 'temp-node') {
+        if (node.for && !node.forProcessed) {
+          exp += genFor(node)
+        } else if (node.if && !node.ifProcessed) {
+          exp += genIf(node)
+        } else if (node.elseif && !node.elseifProcessed) {
+          exp += genElseif(node)
+        } else if (node.else && !node.elseProcessed) {
+          exp += genElse(node)
+        } else {
+          if (node.exps) {
+            exp += genExps(node)
+          }
+          if (!node.unary) {
+            node.children.forEach(function (child) {
+              exp += genNode(child)
+            })
+          }
+        }
+      } else {
+        node.children.forEach(function (child) {
+          exp += genNode(child)
+        })
+      }
     }
   }
   return exp
@@ -1185,5 +1863,6 @@ module.exports = {
   parseComponent,
   parse,
   serialize,
-  genNode
+  genNode,
+  makeAttrsMap
 }

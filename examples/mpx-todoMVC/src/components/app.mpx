@@ -6,10 +6,14 @@
     </view>
 
     <view class="main" hidden="{{todos.length===0}}">
-      <checkbox-group bindchange="toggleAll">
+      <checkbox-group wx:if="{{__mpx_mode__ !== 'swan'}}" bindchange="toggleAll">
         <checkbox class="toggle-all" id="toggle-all" checked="{{allChecked}}"/>
-        <label class=".label" for="toggle-all"></label>
+        <label class="label" for="toggle-all"></label>
       </checkbox-group>
+      <view wx:if="{{__mpx_mode__ === 'swan'}}" bindtap="toggleAll">
+        <checkbox class="toggle-all" id="toggle-all" checked="{{allChecked}}"/>
+        <label class="label" for="toggle-all"></label>
+      </view>
       <view class="todo-list">
         <view class="todo-wrap" wx:for="{{filteredTodos}}" wx:key="{{index}}">
           <todo todo="{{item}}" index="{{index}}"></todo>
@@ -22,9 +26,9 @@
         <view class="strong">{{remaining}}</view>items left
       </view>
 
-      <view class="filters" bindtap="setVisibility">
+      <view class="filters">
         <view wx:for="{{filters}}" wx:key="{{index}}" class="li">
-          <view data-item="{{item}}" class="{{visibility === item?'a selected':'a'}}">{{item}}</view>
+          <view bindtap="setVisibility(item)" data-item="{{item}}" class="{{visibility === item?'a selected':'a'}}">{{item}}</view>
         </view>
       </view>
 
@@ -36,7 +40,7 @@
 </template>
 
 <script>
-  import {createComponent} from '@mpxjs/core'
+  import { createComponent } from '@mpxjs/core'
   import store from '../store/index'
 
   const filters = {
@@ -66,22 +70,21 @@
       console.log(this.filteredTodos)
     },
     methods: {
-      addTodo (e) {
-        var text = this.inputVal
+      addTodo () {
+        const text = this.inputVal
         if (text.trim()) {
-          store.commit('addTodo', {text})
+          store.commit('addTodo', { text })
         }
         this.inputVal = ''
       },
       toggleAll () {
-        store.commit('toggleAll', {done: !this.allChecked})
+        store.commit('toggleAll', { done: !this.allChecked })
       },
       ...store.mapMutations([
         'clearCompleted'
       ]),
-      setVisibility (e) {
-        console.log(e.target.dataset.item)
-        this.visibility = e.target.dataset.item
+      setVisibility (filterName) {
+        this.visibility = filterName
       }
     }
   })
@@ -136,6 +139,7 @@
   }
 
   .toggle-all + .label {
+    margin-left: 10px;
     width: 60px;
     height: 34px;
     font-size: 0;

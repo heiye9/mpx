@@ -9,13 +9,18 @@ class InjectDependency extends NullDependency {
   }
 
   get type () {
-    return 'navigator'
+    return 'mpx inject'
+  }
+
+  updateHash (hash) {
+    super.updateHash(hash)
+    hash.update(this.content)
   }
 }
 
 InjectDependency.Template = class InjectDependencyTemplate {
   apply (dep, source) {
-    source.insert(dep.index, '/* mpx global inject */ ' + dep.content)
+    source.insert(dep.index, '/* mpx inject */ ' + dep.content)
   }
 }
 

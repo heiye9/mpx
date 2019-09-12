@@ -3,8 +3,8 @@ import {
   getByPath
 } from '../helper/utils'
 function mapFactory (type, store) {
-  return function (maps) {
-    maps = normalizeMap(maps)
+  return function (depPath, maps) {
+    maps = normalizeMap(depPath, maps)
     const result = {}
     for (let key in maps) {
       result[key] = function (payload) {
@@ -14,13 +14,12 @@ function mapFactory (type, store) {
         } else if (type === 'actions') {
           return store.dispatch(value, payload)
         } else {
-          const getterVal = getByPath(store.getters, value, '__NOTFOUND__')
+          let getterVal = getByPath(store.getters, value, '', '__NOTFOUND__')
           if (getterVal === '__NOTFOUND__') {
-            console.warn(new Error(`not found getter named [${value}]`))
-            return ''
-          } else {
-            return getterVal === undefined ? '' : getterVal
+            console.warn('【MPX ERROR】', new Error(`unknown getter named [${value}]`))
+            getterVal = ''
           }
+          return getterVal
         }
       }
     }
@@ -32,8 +31,8 @@ export default function (store) {
     mapGetters: mapFactory('getters', store),
     mapMutations: mapFactory('mutations', store),
     mapActions: mapFactory('actions', store),
-    mapState: (maps) => {
-      maps = normalizeMap(maps)
+    mapState: (depPath, maps) => {
+      maps = normalizeMap(depPath, maps)
       const result = {}
       Object.keys(maps).forEach(key => {
         const value = maps[key]
